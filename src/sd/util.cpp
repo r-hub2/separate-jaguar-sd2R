@@ -86,6 +86,10 @@ int round_up_to(int value, int base) {
 #ifdef _WIN32  // code for windows
 #define NOMINMAX
 #include <windows.h>
+#ifdef GGML_R_PACKAGE
+#undef abort  // r_ggml_compat.h redefines abort() as a macro; undo it after
+              // <windows.h> because msxml.h uses abort in declarations.
+#endif
 
 bool file_exists(const std::string& filename) {
     DWORD attributes = GetFileAttributesA(filename.c_str());

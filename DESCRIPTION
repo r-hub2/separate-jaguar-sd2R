@@ -50,7 +50,7 @@ Suggests: testthat (>= 3.0.0), callr, png
 RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-03-09 13:21:12 UTC; yuri
+Packaged: 2026-03-09 13:37:42 UTC; yuri
 Author: Yuri Baramykov [aut, cre],
   Georgi Gerganov [ctb, cph] (Author of the GGML library),
   leejet [ctb, cph] (Author of stable-diffusion.cpp),
