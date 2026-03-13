@@ -33,6 +33,28 @@
 #' @param vram_gb Override available VRAM in GB. When set, disables auto-detection
 #'   and uses this value for strategy routing. Default \code{NULL} (auto-detect
 #'   from Vulkan device).
+#' @param device_layout GPU layout preset for multi-GPU systems. One of:
+#'   \describe{
+#'     \item{\code{"mono"}}{All models on one GPU (default).}
+#'     \item{\code{"split_encoders"}}{Text encoders (CLIP/T5) on GPU 1,
+#'       diffusion + VAE on GPU 0.}
+#'     \item{\code{"split_vae"}}{Text encoders + VAE on GPU 1,
+#'       diffusion on GPU 0. Maximizes VRAM for diffusion.}
+#'     \item{\code{"encoders_cpu"}}{Text encoders on CPU,
+#'       diffusion + VAE on GPU. Saves GPU memory at the cost of slower
+#'       text encoding.}
+#'   }
+#'   Ignored when \code{diffusion_gpu}, \code{clip_gpu}, or \code{vae_gpu}
+#'   are explicitly set (>= 0).
+#' @param diffusion_gpu Vulkan GPU device index for the diffusion model.
+#'   Default \code{-1} (use \code{SD_VK_DEVICE} env or device 0).
+#'   Overrides \code{device_layout}.
+#' @param clip_gpu Vulkan GPU device index for CLIP/T5 text encoders.
+#'   Default \code{-1} (same device as diffusion).
+#'   Overrides \code{device_layout}.
+#' @param vae_gpu Vulkan GPU device index for VAE encoder/decoder.
+#'   Default \code{-1} (same device as diffusion).
+#'   Overrides \code{device_layout}.
 #' @param verbose If \code{TRUE}, print model loading progress and sampling
 #'   steps. Default \code{FALSE}.
 #' @return An external pointer to the SD context (class "sd_ctx") with
@@ -66,6 +88,10 @@ sd_ctx <- function(model_path = NULL,
                    flow_shift = 0.0,
                    model_type = "sd1",
                    vram_gb = NULL,
+                   device_layout = "mono",
+                   diffusion_gpu = -1L,
+                   clip_gpu = -1L,
+                   vae_gpu = -1L,
                    verbose = FALSE) {
 
   sd_set_verbose(verbose)
@@ -111,6 +137,15 @@ sd_ctx <- function(model_path = NULL,
   if (!is.null(prediction)) {
     params$prediction <- as.integer(prediction)
   }
+
+  # GPU device layout
+  layout <- .resolve_device_layout(device_layout, diffusion_gpu, clip_gpu,
+                                    vae_gpu, keep_clip_on_cpu, keep_vae_on_cpu)
+  if (layout$diffusion >= 0L) params$diffusion_gpu_device <- layout$diffusion
+  if (layout$clip >= 0L)      params$clip_gpu_device      <- layout$clip
+  if (layout$vae >= 0L)       params$vae_gpu_device       <- layout$vae
+  if (layout$clip_on_cpu)     params$keep_clip_on_cpu     <- TRUE
+  if (layout$vae_on_cpu)      params$keep_vae_on_cpu      <- TRUE
 
   ctx <- sd_create_context(params)
   attr(ctx, "model_type") <- model_type
@@ -159,7 +194,10 @@ sd_ctx <- function(model_path = NULL,
 #' @param eta Eta parameter for DDIM-like samplers
 #' @param hr_strength Denoising strength for highres fix refinement pass
 #'   (default 0.4). Only used when auto-routing selects highres fix.
-#' @param vae_mode VAE processing mode (default "auto")
+#' @param vae_mode VAE processing mode: \code{"normal"}, \code{"tiled"}, or
+#'   \code{"auto"} (VRAM-aware: queries free GPU memory and enables tiling
+#'   only when estimated peak VAE usage exceeds available VRAM minus a 50 MB
+#'   reserve). Default \code{"auto"}.
 #' @param vae_tile_size Tile size for VAE tiling (default 64)
 #' @param vae_tile_overlap Overlap for VAE tiling (default 0.25)
 #' @return List of SD images (or single image for highres fix path).
@@ -360,11 +398,13 @@ sd_generate <- function(ctx,
 #' @param control_image Optional control image for ControlNet (sd_image format)
 #' @param control_strength ControlNet strength (default 0.9)
 #' @param vae_mode VAE processing mode: \code{"normal"} (no tiling),
-#'   \code{"tiled"} (always tile), or \code{"auto"} (tile when
-#'   \code{width * height > vae_auto_threshold}). Default \code{"auto"}.
-#' @param vae_auto_threshold Pixel area threshold for \code{vae_mode = "auto"}.
-#'   Tiling activates when \code{width * height} exceeds this value.
-#'   Default \code{1048576L} (1024x1024 pixels). Adjust for your VRAM budget.
+#'   \code{"tiled"} (always tile), or \code{"auto"} (VRAM-aware: queries free
+#'   GPU memory via Vulkan and compares against estimated peak VAE usage;
+#'   tiles only when VRAM is insufficient). Default \code{"auto"}.
+#' @param vae_auto_threshold Pixel area fallback threshold for
+#'   \code{vae_mode = "auto"} when VRAM query is unavailable (no Vulkan, CPU
+#'   backend, etc.). Tiling activates when \code{width * height} exceeds this
+#'   value. Default \code{1048576L} (1024x1024 pixels).
 #' @param vae_tile_size Tile size in latent pixels for tiled VAE (default 64).
 #'   Ignored when \code{vae_tile_rel_x}/\code{vae_tile_rel_y} are set.
 #' @param vae_tile_overlap Overlap ratio between tiles, 0.0-0.5 (default 0.25)
@@ -407,7 +447,9 @@ sd_txt2img <- function(ctx,
     vae_tiling = vae_tiling,
     width = width,
     height = height,
-    vae_auto_threshold = vae_auto_threshold
+    vae_auto_threshold = vae_auto_threshold,
+    ctx = ctx,
+    batch = batch_count
   )
 
   params <- list(
@@ -487,7 +529,9 @@ sd_img2img <- function(ctx,
     vae_tiling = vae_tiling,
     width = width,
     height = height,
-    vae_auto_threshold = vae_auto_threshold
+    vae_auto_threshold = vae_auto_threshold,
+    ctx = ctx,
+    batch = batch_count
   )
 
   params <- list(
@@ -579,7 +623,9 @@ sd_txt2img_tiled <- function(ctx,
     vae_tiling = NULL,
     width = width,
     height = height,
-    vae_auto_threshold = vae_auto_threshold
+    vae_auto_threshold = vae_auto_threshold,
+    ctx = ctx,
+    batch = batch_count
   )
 
   params <- list(
@@ -666,7 +712,9 @@ sd_img2img_tiled <- function(ctx,
     vae_tiling = NULL,
     width = width,
     height = height,
-    vae_auto_threshold = vae_auto_threshold
+    vae_auto_threshold = vae_auto_threshold,
+    ctx = ctx,
+    batch = batch_count
   )
 
   params <- list(
@@ -850,8 +898,9 @@ sd_highres_fix <- function(ctx,
 #' @param clip_skip Number of CLIP layers to skip (-1 = auto)
 #' @param eta Eta parameter for DDIM-like samplers
 #' @param vae_mode VAE tiling mode for the harmonization pass
-#'   (default \code{"auto"}, see \code{\link{sd_txt2img}}).
-#' @param vae_auto_threshold Pixel area threshold for auto VAE tiling
+#'   (default \code{"auto"}: VRAM-aware, see \code{\link{sd_txt2img}}).
+#' @param vae_auto_threshold Pixel area fallback threshold for auto VAE tiling
+#'   when VRAM query is unavailable
 #' @param vae_tile_size Tile size for VAE tiling (default 64)
 #' @param vae_tile_overlap Overlap for VAE tiling (default 0.25)
 #' @return SD image (list with width, height, channel, data)
@@ -995,6 +1044,52 @@ sd_txt2img_highres <- function(ctx,
 #' @param model_type One of "sd1", "sd2", "sdxl", "flux", "sd3"
 #' @return Integer tile size in pixels
 #' @keywords internal
+#' Resolve device layout preset to concrete GPU indices
+#'
+#' @param layout One of "mono", "split_encoders", "split_vae", "encoders_cpu"
+#' @param diffusion_gpu Manual override (-1 = use layout)
+#' @param clip_gpu Manual override (-1 = use layout)
+#' @param vae_gpu Manual override (-1 = use layout)
+#' @param keep_clip_on_cpu Existing keep_clip_on_cpu flag
+#' @param keep_vae_on_cpu Existing keep_vae_on_cpu flag
+#' @return List with diffusion, clip, vae (GPU indices), clip_on_cpu, vae_on_cpu
+#' @keywords internal
+.resolve_device_layout <- function(layout, diffusion_gpu, clip_gpu, vae_gpu,
+                                    keep_clip_on_cpu, keep_vae_on_cpu) {
+  layout <- match.arg(layout, c("mono", "split_encoders", "split_vae",
+                                 "encoders_cpu"))
+  has_manual <- any(c(diffusion_gpu, clip_gpu, vae_gpu) >= 0L)
+
+  if (has_manual) {
+    return(list(
+      diffusion = as.integer(diffusion_gpu),
+      clip      = as.integer(clip_gpu),
+      vae       = as.integer(vae_gpu),
+      clip_on_cpu = keep_clip_on_cpu,
+      vae_on_cpu  = keep_vae_on_cpu
+    ))
+  }
+
+  switch(layout,
+    mono = list(
+      diffusion = -1L, clip = -1L, vae = -1L,
+      clip_on_cpu = keep_clip_on_cpu, vae_on_cpu = keep_vae_on_cpu
+    ),
+    split_encoders = list(
+      diffusion = 0L, clip = 1L, vae = -1L,
+      clip_on_cpu = FALSE, vae_on_cpu = keep_vae_on_cpu
+    ),
+    split_vae = list(
+      diffusion = 0L, clip = 1L, vae = 1L,
+      clip_on_cpu = FALSE, vae_on_cpu = FALSE
+    ),
+    encoders_cpu = list(
+      diffusion = -1L, clip = -1L, vae = -1L,
+      clip_on_cpu = TRUE, vae_on_cpu = keep_vae_on_cpu
+    )
+  )
+}
+
 .native_tile_size <- function(model_type) {
   switch(model_type,
     sd1  = 512L,
@@ -1168,28 +1263,73 @@ sd_convert <- function(input_path, output_path, output_type = SD_TYPE$F16,
   )
 }
 
+#' Estimate peak VAE VRAM usage in bytes
+#'
+#' Rough upper bound based on the largest intermediate feature map
+#' (conv layer with ~512 channels, f32). SDXL/Flux use wider channels.
+#'
+#' @param width Image width in pixels
+#' @param height Image height in pixels
+#' @param model_type Model type string ("sd1", "sd2", "sdxl", "flux", etc.)
+#' @param batch Batch size (default 1)
+#' @return Estimated peak VRAM in bytes
+#' @keywords internal
+.estimate_vae_vram <- function(width, height, model_type = "sd1", batch = 1L) {
+  peak_factor <- switch(model_type,
+    sdxl = , flux = 4096,  # 512 channels * 4 bytes * 2 (wider)
+    2048                    # 512 channels * 4 bytes
+  )
+  as.numeric(width) * as.numeric(height) * peak_factor * as.numeric(batch)
+}
+
 #' Resolve VAE tiling mode to boolean
+#'
+#' In \code{"auto"} mode, queries free VRAM from the Vulkan backend and
+#' compares against \code{\link{.estimate_vae_vram}}. Falls back to the
+#' pixel-area \code{vae_auto_threshold} when VRAM query is unavailable.
 #'
 #' @param vae_mode One of "normal", "tiled", "auto"
 #' @param vae_tiling Deprecated boolean flag (NULL if not set)
 #' @param width Image width in pixels
 #' @param height Image height in pixels
-#' @param vae_auto_threshold Pixel area threshold for auto mode
+#' @param vae_auto_threshold Pixel area threshold — fallback for auto mode
+#'   when VRAM query fails
+#' @param ctx SD context (used to read device index and model_type).
+#'   NULL disables VRAM-aware logic.
+#' @param batch Batch size for VRAM estimation (default 1)
+#' @param system_reserve Bytes to keep free as safety margin (default 50 MB)
 #' @return Logical, TRUE if tiling should be enabled
 #' @keywords internal
 .resolve_vae_tiling <- function(vae_mode, vae_tiling, width, height,
-                                vae_auto_threshold) {
+                                vae_auto_threshold, ctx = NULL, batch = 1L,
+                                system_reserve = 50 * 1024^2) {
   if (!is.null(vae_tiling)) {
     warning("'vae_tiling' is deprecated. Use vae_mode = \"tiled\" instead.",
             call. = FALSE)
     return(isTRUE(vae_tiling))
   }
   vae_mode <- match.arg(vae_mode, c("normal", "tiled", "auto"))
-  switch(vae_mode,
-    normal = FALSE,
-    tiled  = TRUE,
-    auto   = as.integer(width) * as.integer(height) >= as.numeric(vae_auto_threshold)
-  )
+  if (vae_mode != "auto") {
+    return(vae_mode == "tiled")
+  }
+
+  # --- auto mode: try VRAM-aware decision first ---
+  if (!is.null(ctx)) {
+    device <- attr(ctx, "vram_device") %||% 0L
+    model_type <- attr(ctx, "model_type") %||% "sd1"
+    free_vram <- tryCatch({
+      ggmlR::ggml_vulkan_device_memory(device)$free
+    }, error = function(e) NULL)
+
+    if (!is.null(free_vram) && is.numeric(free_vram) && free_vram > 0) {
+      required <- .estimate_vae_vram(width, height, model_type, batch) +
+        system_reserve
+      return(required > free_vram)
+    }
+  }
+
+  # --- fallback: static pixel-area threshold ---
+  as.integer(width) * as.integer(height) >= as.numeric(vae_auto_threshold)
 }
 
 #' Parallel generation across multiple GPUs

@@ -62,7 +62,10 @@ txt2img.}
 \item{hr_strength}{Denoising strength for highres fix refinement pass
 (default 0.4). Only used when auto-routing selects highres fix.}
 
-\item{vae_mode}{VAE processing mode (default "auto")}
+\item{vae_mode}{VAE processing mode: \code{"normal"}, \code{"tiled"}, or
+\code{"auto"} (VRAM-aware: queries free GPU memory and enables tiling
+only when estimated peak VAE usage exceeds available VRAM minus a 50 MB
+reserve). Default \code{"auto"}.}
 
 \item{vae_tile_size}{Tile size for VAE tiling (default 64)}
 

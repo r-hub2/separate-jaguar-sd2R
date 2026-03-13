@@ -61,12 +61,14 @@ sd_txt2img(
 \item{control_strength}{ControlNet strength (default 0.9)}
 
 \item{vae_mode}{VAE processing mode: \code{"normal"} (no tiling),
-\code{"tiled"} (always tile), or \code{"auto"} (tile when
-\code{width * height > vae_auto_threshold}). Default \code{"auto"}.}
+\code{"tiled"} (always tile), or \code{"auto"} (VRAM-aware: queries free
+GPU memory via Vulkan and compares against estimated peak VAE usage;
+tiles only when VRAM is insufficient). Default \code{"auto"}.}
 
-\item{vae_auto_threshold}{Pixel area threshold for \code{vae_mode = "auto"}.
-Tiling activates when \code{width * height} exceeds this value.
-Default \code{1048576L} (1024x1024 pixels). Adjust for your VRAM budget.}
+\item{vae_auto_threshold}{Pixel area fallback threshold for
+\code{vae_mode = "auto"} when VRAM query is unavailable (no Vulkan, CPU
+backend, etc.). Tiling activates when \code{width * height} exceeds this
+value. Default \code{1048576L} (1024x1024 pixels).}
 
 \item{vae_tile_size}{Tile size in latent pixels for tiled VAE (default 64).
 Ignored when \code{vae_tile_rel_x}/\code{vae_tile_rel_y} are set.}
