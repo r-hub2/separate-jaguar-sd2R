@@ -54,7 +54,7 @@ Suggests: testthat (>= 3.0.0), callr, png, plumber, base64enc, jsonlite
 RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-03-13 21:00:13 UTC; yuri
+Packaged: 2026-03-13 21:49:23 UTC; yuri
 Author: Yuri Baramykov [aut, cre],
   Georgi Gerganov [ctb, cph] (Author of the GGML library),
   leejet [ctb, cph] (Author of stable-diffusion.cpp),
