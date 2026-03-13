@@ -25,7 +25,9 @@ sd_txt2img_tiled(
   vae_tile_size = 64L,
   vae_tile_overlap = 0.25,
   vae_tile_rel_x = NULL,
-  vae_tile_rel_y = NULL
+  vae_tile_rel_y = NULL,
+  cache_mode = c("off", "easy", "ucache"),
+  cache_config = NULL
 )
 }
 \arguments{
@@ -84,6 +86,13 @@ over \code{vae_tile_size}.}
 \item{vae_tile_rel_y}{Relative tile height as fraction of latent height (0-1)
 or number of tiles (>1). NULL = use \code{vae_tile_size}. Takes priority
 over \code{vae_tile_size}.}
+
+\item{cache_mode}{Step caching mode: \code{"off"} (default), \code{"easy"}
+(EasyCache — skips redundant denoising steps), or \code{"ucache"} (UCache).
+Can speed up sampling 20-40\% with minor quality impact.}
+
+\item{cache_config}{Optional fine-tuned cache config from
+\code{\link{sd_cache_params}}. Overrides \code{cache_mode} when provided.}
 }
 \value{
 List of SD images

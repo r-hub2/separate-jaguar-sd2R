@@ -22,6 +22,8 @@
 #' @param keep_clip_on_cpu Keep CLIP model on CPU even when using GPU
 #' @param keep_vae_on_cpu Keep VAE on CPU even when using GPU
 #' @param diffusion_flash_attn Enable flash attention for diffusion model
+#'   (default TRUE). Set to FALSE if you experience issues with specific
+#'   GPU drivers or backends.
 #' @param rng_type RNG type (see \code{RNG_TYPE})
 #' @param prediction Prediction type override (see \code{PREDICTION}), NULL = auto
 #' @param lora_apply_mode LoRA application mode (see \code{LORA_APPLY_MODE})
@@ -81,7 +83,7 @@ sd_ctx <- function(model_path = NULL,
                    free_params_immediately = FALSE,
                    keep_clip_on_cpu = FALSE,
                    keep_vae_on_cpu = FALSE,
-                   diffusion_flash_attn = FALSE,
+                   diffusion_flash_attn = TRUE,
                    rng_type = RNG_TYPE$CUDA,
                    prediction = NULL,
                    lora_apply_mode = LORA_APPLY_MODE$AUTO,
@@ -232,7 +234,9 @@ sd_generate <- function(ctx,
                         hr_strength = 0.4,
                         vae_mode = "auto",
                         vae_tile_size = 64L,
-                        vae_tile_overlap = 0.25) {
+                        vae_tile_overlap = 0.25,
+                        cache_mode = c("off", "easy", "ucache"),
+                        cache_config = NULL) {
   # img2img: default to init_image dimensions when width/height not specified
   if (!is.null(init_image)) {
     if (missing(width))  width  <- init_image$width
@@ -267,7 +271,9 @@ sd_generate <- function(ctx,
                        strength = strength, eta = eta,
                        vae_mode = vae_mode,
                        vae_tile_size = vae_tile_size,
-                       vae_tile_overlap = vae_tile_overlap)
+                       vae_tile_overlap = vae_tile_overlap,
+                       cache_mode = cache_mode,
+                       cache_config = cache_config)
     } else {
       sd_img2img(ctx, prompt,
                  init_image = init_image,
@@ -281,7 +287,9 @@ sd_generate <- function(ctx,
                  strength = strength, eta = eta,
                  vae_mode = vae_mode,
                  vae_tile_size = vae_tile_size,
-                 vae_tile_overlap = vae_tile_overlap)
+                 vae_tile_overlap = vae_tile_overlap,
+                 cache_mode = cache_mode,
+                 cache_config = cache_config)
     }
   } else {
     if (strategy == "highres_fix") {
@@ -295,7 +303,9 @@ sd_generate <- function(ctx,
                             eta = eta, hr_strength = hr_strength,
                             vae_mode = vae_mode,
                             vae_tile_size = vae_tile_size,
-                            vae_tile_overlap = vae_tile_overlap)
+                            vae_tile_overlap = vae_tile_overlap,
+                            cache_mode = cache_mode,
+                            cache_config = cache_config)
       list(img)
     } else if (strategy == "tiled") {
       sd_txt2img_tiled(ctx, prompt,
@@ -308,7 +318,9 @@ sd_generate <- function(ctx,
                        scheduler = scheduler, clip_skip = clip_skip,
                        eta = eta, vae_mode = vae_mode,
                        vae_tile_size = vae_tile_size,
-                       vae_tile_overlap = vae_tile_overlap)
+                       vae_tile_overlap = vae_tile_overlap,
+                       cache_mode = cache_mode,
+                       cache_config = cache_config)
     } else {
       sd_txt2img(ctx, prompt,
                  negative_prompt = negative_prompt,
@@ -320,7 +332,9 @@ sd_generate <- function(ctx,
                  scheduler = scheduler, clip_skip = clip_skip,
                  eta = eta, vae_mode = vae_mode,
                  vae_tile_size = vae_tile_size,
-                 vae_tile_overlap = vae_tile_overlap)
+                 vae_tile_overlap = vae_tile_overlap,
+                 cache_mode = cache_mode,
+                 cache_config = cache_config)
     }
   }
 }
@@ -380,6 +394,30 @@ sd_generate <- function(ctx,
   "tiled"
 }
 
+# Internal: apply cache_mode / cache_config to params list
+.apply_cache_params <- function(params, cache_mode, cache_config) {
+  if (!is.null(cache_config)) {
+    # Custom config overrides everything
+    params$cache_mode <- as.integer(cache_config$cache_mode)
+    params$cache_threshold <- as.numeric(cache_config$cache_threshold)
+    params$cache_start <- as.numeric(cache_config$cache_start)
+    params$cache_end <- as.numeric(cache_config$cache_end)
+  } else {
+    mode <- match.arg(cache_mode, c("off", "easy", "ucache"))
+    if (mode != "off") {
+      params$cache_mode <- switch(mode,
+        easy   = SD_CACHE_MODE$EASYCACHE,
+        ucache = SD_CACHE_MODE$UCACHE
+      )
+      # Use C++ defaults for threshold/start/end
+      params$cache_threshold <- 0.3
+      params$cache_start <- 0.3
+      params$cache_end <- 0.8
+    }
+  }
+  params
+}
+
 #' Generate images from text prompt
 #'
 #' @param ctx SD context created by \code{\link{sd_ctx}}
@@ -416,6 +454,11 @@ sd_generate <- function(ctx,
 #'   over \code{vae_tile_size}.
 #' @param vae_tiling \strong{Deprecated.} Use \code{vae_mode} instead.
 #'   If \code{TRUE}, equivalent to \code{vae_mode = "tiled"}.
+#' @param cache_mode Step caching mode: \code{"off"} (default), \code{"easy"}
+#'   (EasyCache — skips redundant denoising steps), or \code{"ucache"} (UCache).
+#'   Can speed up sampling 20-40\% with minor quality impact.
+#' @param cache_config Optional fine-tuned cache config from
+#'   \code{\link{sd_cache_params}}. Overrides \code{cache_mode} when provided.
 #' @return List of SD images. Each image is a list with
 #'   width, height, channel, and data (raw vector of RGB pixels).
 #'   Use \code{\link{sd_save_image}} to save or \code{\link{sd_image_to_array}} to convert.
@@ -441,7 +484,9 @@ sd_txt2img <- function(ctx,
                        vae_tile_overlap = 0.25,
                        vae_tile_rel_x = NULL,
                        vae_tile_rel_y = NULL,
-                       vae_tiling = NULL) {
+                       vae_tiling = NULL,
+                       cache_mode = c("off", "easy", "ucache"),
+                       cache_config = NULL) {
   vae_tiling_resolved <- .resolve_vae_tiling(
     vae_mode = vae_mode,
     vae_tiling = vae_tiling,
@@ -480,6 +525,7 @@ sd_txt2img <- function(ctx,
   if (!is.null(control_image)) {
     params$control_image <- control_image
   }
+  params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
 }
@@ -513,7 +559,9 @@ sd_img2img <- function(ctx,
                        vae_tile_overlap = 0.25,
                        vae_tile_rel_x = NULL,
                        vae_tile_rel_y = NULL,
-                       vae_tiling = NULL) {
+                       vae_tiling = NULL,
+                       cache_mode = c("off", "easy", "ucache"),
+                       cache_config = NULL) {
   # FIX: sd_ctx() defaults to vae_decode_only=TRUE, but img2img needs the VAE
   # encoder (encode_first_stage). Without this check, the C++ code hits
   # GGML_ASSERT(!decode_only || decode_graph) in vae.hpp:719.
@@ -559,6 +607,7 @@ sd_img2img <- function(ctx,
   if (!is.null(vae_tile_rel_y)) {
     params$vae_tile_rel_y <- as.numeric(vae_tile_rel_y)
   }
+  params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
 }
@@ -609,7 +658,9 @@ sd_txt2img_tiled <- function(ctx,
                               vae_tile_size = 64L,
                               vae_tile_overlap = 0.25,
                               vae_tile_rel_x = NULL,
-                              vae_tile_rel_y = NULL) {
+                              vae_tile_rel_y = NULL,
+                              cache_mode = c("off", "easy", "ucache"),
+                              cache_config = NULL) {
   # Auto-detect sample tile size from model type
   if (is.null(sample_tile_size)) {
     model_type <- attr(ctx, "model_type") %||% "sd1"
@@ -656,6 +707,7 @@ sd_txt2img_tiled <- function(ctx,
   if (!is.null(vae_tile_rel_y)) {
     params$vae_tile_rel_y <- as.numeric(vae_tile_rel_y)
   }
+  params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
 }
@@ -691,7 +743,9 @@ sd_img2img_tiled <- function(ctx,
                               vae_mode = "auto",
                               vae_auto_threshold = 1048576L,
                               vae_tile_size = 64L,
-                              vae_tile_overlap = 0.25) {
+                              vae_tile_overlap = 0.25,
+                              cache_mode = c("off", "easy", "ucache"),
+                              cache_config = NULL) {
   # FIX: same vae_decode_only guard as sd_img2img (see vae.hpp:719)
   if (isTRUE(attr(ctx, "vae_decode_only"))) {
     stop("img2img requires VAE encoder. Recreate context with vae_decode_only = FALSE.",
@@ -740,6 +794,7 @@ sd_img2img_tiled <- function(ctx,
     sample_tile_size = sample_tile_size,
     sample_tile_overlap = as.numeric(sample_tile_overlap)
   )
+  params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
 }
@@ -783,7 +838,9 @@ sd_highres_fix <- function(ctx,
                             vae_mode = "auto",
                             vae_auto_threshold = 1048576L,
                             vae_tile_size = 64L,
-                            vae_tile_overlap = 0.25) {
+                            vae_tile_overlap = 0.25,
+                            cache_mode = c("off", "easy", "ucache"),
+                            cache_config = NULL) {
   width <- as.integer(width)
   height <- as.integer(height)
   if (is.null(hr_steps)) hr_steps <- sample_steps
@@ -813,7 +870,9 @@ sd_highres_fix <- function(ctx,
                            seed = seed,
                            scheduler = scheduler,
                            clip_skip = clip_skip,
-                           eta = eta)
+                           eta = eta,
+                           cache_mode = cache_mode,
+                           cache_config = cache_config)
   base_img <- base_imgs[[1]]
 
   # Step 2: upscale to target resolution
@@ -850,7 +909,9 @@ sd_highres_fix <- function(ctx,
                               vae_mode = vae_mode,
                               vae_auto_threshold = vae_auto_threshold,
                               vae_tile_size = vae_tile_size,
-                              vae_tile_overlap = vae_tile_overlap)
+                              vae_tile_overlap = vae_tile_overlap,
+                              cache_mode = cache_mode,
+                              cache_config = cache_config)
   result[[1]]
 }
 
@@ -1040,10 +1101,6 @@ sd_txt2img_highres <- function(ctx,
   result
 }
 
-#' Get native tile size for a model type
-#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "sd3"
-#' @return Integer tile size in pixels
-#' @keywords internal
 #' Resolve device layout preset to concrete GPU indices
 #'
 #' @param layout One of "mono", "split_encoders", "split_vae", "encoders_cpu"
@@ -1090,6 +1147,10 @@ sd_txt2img_highres <- function(ctx,
   )
 }
 
+#' Get native tile size for a model type
+#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "sd3"
+#' @return Integer tile size in pixels
+#' @keywords internal
 .native_tile_size <- function(model_type) {
   switch(model_type,
     sd1  = 512L,

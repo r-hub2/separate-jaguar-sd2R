@@ -51,7 +51,8 @@ imgs_flux <- sd_generate(
   sample_steps = 10L, seed = 42L,
   sample_method = SAMPLE_METHOD$EULER,
   scheduler = SCHEDULER$DISCRETE,
-  vae_mode = "tiled"
+  vae_mode = "tiled",
+
 )
 sd_profile_stop()
 elapsed <- (proc.time() - t0)[["elapsed"]]
@@ -74,7 +75,8 @@ hyperdetailed, street photography style, golden hour lighting",
   sample_steps = 10L, seed = 42L,
   sample_method = SAMPLE_METHOD$EULER,
   scheduler = SCHEDULER$DISCRETE,
-  vae_mode = "tiled"
+  vae_mode = "tiled",
+
 )
 elapsed <- (proc.time() - t0)[["elapsed"]]
 cat(sprintf("Generated %d image(s): %dx%d in %.1fs\n",
@@ -94,7 +96,8 @@ cinematic, shot on Sony A7R, f/8, sharp focus, high detail",
   sample_steps = 10L, seed = 42L,
   hr_strength = 0.4,
   sample_method = SAMPLE_METHOD$EULER,
-  scheduler = SCHEDULER$DISCRETE
+  scheduler = SCHEDULER$DISCRETE,
+
 )
 sd_profile_stop()
 elapsed <- (proc.time() - t0)[["elapsed"]]
@@ -114,7 +117,8 @@ imgs_flux_i2i <- sd_generate(
   sample_steps = 10L, seed = 42L,
   sample_method = SAMPLE_METHOD$EULER,
   scheduler = SCHEDULER$DISCRETE,
-  vae_mode = "tiled"
+  vae_mode = "tiled",
+
 )
 elapsed <- (proc.time() - t0)[["elapsed"]]
 cat(sprintf("Generated %d image(s): %dx%d in %.1fs\n",
@@ -135,7 +139,8 @@ street photography, shot on Sony A7R, f/8, sharp focus",
   sample_steps = 10L, seed = 42L,
   sample_method = SAMPLE_METHOD$EULER,
   scheduler = SCHEDULER$DISCRETE,
-  vae_mode = "tiled"
+  vae_mode = "tiled",
+
 )
 elapsed <- (proc.time() - t0)[["elapsed"]]
 cat(sprintf("Generated %d image(s): %dx%d in %.1fs\n",

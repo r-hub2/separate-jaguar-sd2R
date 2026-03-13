@@ -72,7 +72,7 @@
   if (grepl("control", fn)) return("control_net")
   # Diffusion is the fallback for main model files
   if (grepl("flux|sdxl|sd[_-]?v?[123]|unet|dit|mmdit|transformer", fn)) return("diffusion")
-  # Large .gguf/.safetensors without other matches → likely diffusion
+  # Large .gguf/.safetensors without other matches -> likely diffusion
   "unknown"
 }
 
@@ -198,6 +198,7 @@ sd_list_models <- function() {
 #' @param ... Additional arguments passed to \code{\link{sd_ctx}}, overriding
 #'   registry defaults (e.g. \code{vae_decode_only = FALSE})
 #' @return SD context (external pointer)
+#' @importFrom utils modifyList
 #' @export
 #' @examples
 #' \dontrun{
@@ -430,10 +431,10 @@ sd_scan_models <- function(dir, overwrite = FALSE, recursive = FALSE) {
       tryCatch({
         sd_register_model(id, model_type, paths, defaults, overwrite = overwrite)
         registered <- c(registered, id)
-        message("Registered: ", id, " (", model_type, ") — ",
+        message("Registered: ", id, " (", model_type, ") - ",
                 length(paths), " component(s)")
       }, error = function(e) {
-        message("Skipped: ", id, " — ", conditionMessage(e))
+        message("Skipped: ", id, " - ", conditionMessage(e))
       })
     }
 
@@ -479,7 +480,7 @@ sd_scan_models <- function(dir, overwrite = FALSE, recursive = FALSE) {
           registered <- c(registered, id)
           message("Registered: ", id, " (", model_type, ", detected by size)")
         }, error = function(e) {
-          message("Skipped: ", id, " — ", conditionMessage(e))
+          message("Skipped: ", id, " - ", conditionMessage(e))
         })
       }
     }

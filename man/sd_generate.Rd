@@ -23,7 +23,9 @@ sd_generate(
   hr_strength = 0.4,
   vae_mode = "auto",
   vae_tile_size = 64L,
-  vae_tile_overlap = 0.25
+  vae_tile_overlap = 0.25,
+  cache_mode = c("off", "easy", "ucache"),
+  cache_config = NULL
 )
 }
 \arguments{

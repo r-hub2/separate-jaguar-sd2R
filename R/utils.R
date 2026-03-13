@@ -147,6 +147,29 @@ sd_profile_summary <- function(events) {
   result
 }
 
+#' Create cache configuration for step caching
+#'
+#' Constructs a list of cache parameters for fine-tuning step caching behavior.
+#' Pass the result as \code{cache_config} to generation functions.
+#'
+#' @param mode Cache mode integer from \code{SD_CACHE_MODE} (default EASYCACHE)
+#' @param threshold Reuse threshold (default 1.0). Lower = more aggressive caching
+#' @param start_percent Start caching after this fraction of steps (default 0.15)
+#' @param end_percent Stop caching after this fraction of steps (default 0.95)
+#' @return Named list of cache parameters
+#' @export
+sd_cache_params <- function(mode = SD_CACHE_MODE$EASYCACHE,
+                            threshold = 1.0,
+                            start_percent = 0.15,
+                            end_percent = 0.95) {
+  list(
+    cache_mode = as.integer(mode),
+    cache_threshold = as.numeric(threshold),
+    cache_start = as.numeric(start_percent),
+    cache_end = as.numeric(end_percent)
+  )
+}
+
 #' @export
 print.sd_profile <- function(x, ...) {
   if (nrow(x) == 0L) {
