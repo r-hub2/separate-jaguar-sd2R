@@ -2,11 +2,13 @@
 
 ## Bug Fixes
 * Fixed `undefined symbol: ggml_backend_vk_get_device_count` load error on
-  systems where ggmlR was built without Vulkan support (e.g. CRAN servers).
-  The `configure` script now verifies that the Vulkan backend symbol is
-  actually present in `libggml.a` before enabling `-DSD_USE_VULKAN`. Previously,
-  `ggml_vulkan_status()` could report "AVAILABLE" while the symbol was absent
-  from the static library, causing `dyn.load()` to fail at package load time.
+  CRAN Fedora (clang and gcc). Root cause: ggmlR's shared library (`ggmlR.so`)
+  was built with Vulkan, but the static library (`libggml.a`) shipped without
+  Vulkan objects. The old `configure` relied on `ggml_vulkan_status()` which
+  queries `ggmlR.so` — it reported "AVAILABLE", causing sd2R to compile with
+  `-DSD_USE_VULKAN` against a `libggml.a` that lacked the symbols.
+  Now `configure` checks `nm libggml.a` for a defined (`T`) symbol directly,
+  ignoring the runtime ggmlR check entirely.
 
 ---
 
