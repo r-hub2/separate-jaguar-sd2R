@@ -22,6 +22,9 @@ sd_app <- function(model_dir = NULL, launch.browser = TRUE, port = NULL, ...) {
   if (!requireNamespace("base64enc", quietly = TRUE))
     stop("Package 'base64enc' is required. Install with: install.packages('base64enc')",
          call. = FALSE)
+  if (!requireNamespace("jsonlite", quietly = TRUE))
+    stop("Package 'jsonlite' is required. Install with: install.packages('jsonlite')",
+         call. = FALSE)
   app_dir <- system.file("shiny", "sd2R_app", package = "sd2R")
   if (!nzchar(app_dir))
     stop("Shiny app not found in sd2R installation", call. = FALSE)

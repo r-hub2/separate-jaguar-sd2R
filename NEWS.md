@@ -1,3 +1,30 @@
+# sd2R 0.1.9
+
+## Shiny GUI
+* New `sd_app()` launches an interactive Shiny application for image generation.
+  - Auto-detection of model architecture (Flux, SD3, SDXL, SD1/2) from filenames
+    in the models folder — no manual configuration needed.
+  - Non-blocking async generation via C++ `std::thread`: the UI remains responsive
+    during image generation, with a live progress bar and ETA display.
+  - Automatic role assignment for multi-file models (diffusion, VAE, CLIP-L, T5-XXL).
+  - Prevents loading incompatible model combinations (e.g. SD1.5 + Flux).
+
+## Async C++ Generation API
+* New internal functions for non-blocking generation from R:
+  - `sd_generate_async()` — launches generation in a background C++ thread.
+  - `sd_generate_poll()` — checks completion status (atomic flags).
+  - `sd_generate_result()` — retrieves results after completion.
+* Progress callback writes JSON to a temp file (`step`, `steps`, `pct`,
+  `elapsed`, `eta_sec`), read by Shiny via `later::later()` polling.
+* R API calls (`Rprintf`, `R_CheckUserInterrupt`) are suppressed in the
+  worker thread to prevent stack corruption.
+
+## Build System
+* `tools/patch_sd_sources.sh` rewritten: all `sed` calls replaced with
+  `perl -pi -e` for cross-platform compatibility (macOS BSD sed + Linux GNU sed).
+
+---
+
 # sd2R 0.1.8
 
 ## Bug Fixes
