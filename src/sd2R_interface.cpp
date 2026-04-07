@@ -781,6 +781,7 @@ static void async_join_worker() {
 }
 
 // SIGSEGV handler for worker thread — catch crash before R's handler
+#ifndef _WIN32
 #include <signal.h>
 #include <setjmp.h>
 static thread_local sigjmp_buf worker_jmpbuf;
@@ -795,6 +796,7 @@ static void worker_sigsegv_handler(int sig) {
     signal(sig, SIG_DFL);
     raise(sig);
 }
+#endif
 
 // Worker function — runs in std::thread
 static void async_worker() {
@@ -809,6 +811,7 @@ static void async_worker() {
             return;
         }
 
+#ifndef _WIN32
         // Install thread-local SIGSEGV handler to catch crash before R does
         struct sigaction sa_new, sa_old;
         memset(&sa_new, 0, sizeof(sa_new));
@@ -828,6 +831,9 @@ static void async_worker() {
         }
         // Restore R's signal handler
         sigaction(SIGSEGV, &sa_old, nullptr);
+#else
+        g_async.results = generate_image(g_async.ctx, &g_async.params);
+#endif
         if (!g_async.results) {
             g_async.error_msg = "Image generation failed";
         }
