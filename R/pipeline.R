@@ -241,6 +241,18 @@ sd_generate <- function(ctx,
                         vae_tile_overlap = 0.25,
                         cache_mode = c("off", "easy", "ucache"),
                         cache_config = NULL) {
+  # Resolve string names to integer enum values
+  if (is.character(sample_method)) {
+    sm <- SAMPLE_METHOD[[sample_method]]
+    if (is.null(sm)) stop("Unknown sample_method: ", sample_method, call. = FALSE)
+    sample_method <- sm
+  }
+  if (is.character(scheduler)) {
+    sc <- SCHEDULER[[scheduler]]
+    if (is.null(sc)) stop("Unknown scheduler: ", scheduler, call. = FALSE)
+    scheduler <- sc
+  }
+
   # img2img: default to init_image dimensions when width/height not specified
   if (!is.null(init_image)) {
     if (missing(width))  width  <- init_image$width
@@ -491,6 +503,18 @@ sd_txt2img <- function(ctx,
                        vae_tiling = NULL,
                        cache_mode = c("off", "easy", "ucache"),
                        cache_config = NULL) {
+  # Resolve string names to integer enum values
+  if (is.character(sample_method)) {
+    sm <- SAMPLE_METHOD[[sample_method]]
+    if (is.null(sm)) stop("Unknown sample_method: ", sample_method, call. = FALSE)
+    sample_method <- sm
+  }
+  if (is.character(scheduler)) {
+    sc <- SCHEDULER[[scheduler]]
+    if (is.null(sc)) stop("Unknown scheduler: ", scheduler, call. = FALSE)
+    scheduler <- sc
+  }
+
   vae_tiling_resolved <- .resolve_vae_tiling(
     vae_mode = vae_mode,
     vae_tiling = vae_tiling,
@@ -573,6 +597,18 @@ sd_img2img <- function(ctx,
     stop("img2img requires VAE encoder. Recreate context with vae_decode_only = FALSE.",
          call. = FALSE)
   }
+  # Resolve string names to integer enum values
+  if (is.character(sample_method)) {
+    sm <- SAMPLE_METHOD[[sample_method]]
+    if (is.null(sm)) stop("Unknown sample_method: ", sample_method, call. = FALSE)
+    sample_method <- sm
+  }
+  if (is.character(scheduler)) {
+    sc <- SCHEDULER[[scheduler]]
+    if (is.null(sc)) stop("Unknown scheduler: ", scheduler, call. = FALSE)
+    scheduler <- sc
+  }
+
   if (is.null(width)) width <- init_image$width
   if (is.null(height)) height <- init_image$height
 
