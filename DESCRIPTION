@@ -76,7 +76,7 @@ Description: Provides Stable Diffusion image generation in R using the 'ggmlR'
     separate 'Vulkan' devices. Built-in profiling (sd_profile_start(),
     sd_profile_summary()) for per-stage timing of text encoding, sampling,
     and 'VAE' decode. Interactive Shiny GUI via sd_app() with non-blocking
-    async generation (C++ std::thread), live progress bar, auto-detection
+    asynchronous generation (C++ std::thread), live progress bar, auto-detection
     of model architecture, and ETA display. Supports CPU and 'Vulkan' GPU.
     No 'Python' or external API dependencies required.
     Cross-platform: Linux, macOS, Windows.
@@ -94,7 +94,7 @@ Suggests: testthat (>= 3.0.0), callr, png, shiny, base64enc, plumber,
 RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-04-07 15:50:36 UTC; yuri
+Packaged: 2026-04-08 16:53:42 UTC; yuri
 Author: Yuri Baramykov [aut, cre],
   Georgi Gerganov [ctb, cph] (Author of the GGML library),
   leejet [ctb, cph] (Author of stable-diffusion.cpp),
