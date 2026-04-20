@@ -330,6 +330,10 @@ SEXP sd_create_context(Rcpp::List params) {
         p.keep_control_net_on_cpu = Rcpp::as<bool>(params["keep_control_net_on_cpu"]);
     if (params.containsElementNamed("keep_vae_on_cpu"))
         p.keep_vae_on_cpu = Rcpp::as<bool>(params["keep_vae_on_cpu"]);
+    if (params.containsElementNamed("vae_conv_direct"))
+        p.vae_conv_direct = Rcpp::as<bool>(params["vae_conv_direct"]);
+    if (params.containsElementNamed("diffusion_conv_direct"))
+        p.diffusion_conv_direct = Rcpp::as<bool>(params["diffusion_conv_direct"]);
     if (params.containsElementNamed("diffusion_flash_attn"))
         p.diffusion_flash_attn = Rcpp::as<bool>(params["diffusion_flash_attn"]);
     if (params.containsElementNamed("flow_shift"))
@@ -465,6 +469,10 @@ bool sd_create_context_async(Rcpp::List params) {
         p.keep_control_net_on_cpu = Rcpp::as<bool>(params["keep_control_net_on_cpu"]);
     if (params.containsElementNamed("keep_vae_on_cpu"))
         p.keep_vae_on_cpu = Rcpp::as<bool>(params["keep_vae_on_cpu"]);
+    if (params.containsElementNamed("vae_conv_direct"))
+        p.vae_conv_direct = Rcpp::as<bool>(params["vae_conv_direct"]);
+    if (params.containsElementNamed("diffusion_conv_direct"))
+        p.diffusion_conv_direct = Rcpp::as<bool>(params["diffusion_conv_direct"]);
     if (params.containsElementNamed("diffusion_flash_attn"))
         p.diffusion_flash_attn = Rcpp::as<bool>(params["diffusion_flash_attn"]);
     if (params.containsElementNamed("flow_shift"))
