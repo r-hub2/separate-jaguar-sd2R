@@ -97,9 +97,11 @@ GPU drivers or backends.}
 \item{flow_shift}{Flow shift value for Flux models}
 
 \item{model_type}{Model architecture hint: \code{"sd1"}, \code{"sd2"},
-\code{"sdxl"}, \code{"flux"}, or \code{"sd3"}. Used by
+\code{"sdxl"}, \code{"flux"}, \code{"sd3"}, or \code{"auto"}. Used by
 \code{\link{sd_generate}} to determine native resolution and tile sizes.
-Default \code{"sd1"}.}
+With \code{"auto"}, the type is detected from a sibling \code{config.json}
+then the filename (GGUF-metadata detection is a future hook); detection
+errors with a hint if it cannot decide. Default \code{"sd1"}.}
 
 \item{vram_gb}{Override available VRAM in GB. When set, disables auto-detection
 and uses this value for strategy routing. Default \code{NULL} (auto-detect

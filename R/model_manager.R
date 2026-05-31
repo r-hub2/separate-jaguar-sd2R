@@ -76,6 +76,83 @@
   "unknown"
 }
 
+#' Detect model type from a GGUF file's KV metadata (hook / not yet available)
+#'
+#' Intended integration point for reading \code{general.architecture} from a
+#' GGUF header WITHOUT loading tensor weights. ggmlR's current
+#' \code{gguf_load()} allocates and reads the full tensor blob (no_alloc =
+#' FALSE), which is unacceptable for a lightweight type probe on multi-GB Flux
+#' models. Until ggmlR exposes a metadata-only load (e.g.
+#' \code{gguf_load(path, meta_only = TRUE)} backed by ggml's no_alloc), this
+#' returns \code{NULL} so the caller falls through to config.json / filename.
+#'
+#' Replace the body with a real header read once ggmlR supports it — this is
+#' the single line to change.
+#' @param path Path to a .gguf file
+#' @return Model type string, or \code{NULL} if unavailable
+#' @keywords internal
+.detect_model_type_gguf <- function(path) {
+  # TODO(ggmlR): needs gguf_load(meta_only = TRUE) (no_alloc header read).
+  NULL
+}
+
+#' Detect model type from a sibling config.json (diffusers-style layout)
+#'
+#' Looks for \code{config.json} next to the model file and maps its
+#' \code{model_type} / \code{architectures[1]} / \code{_class_name} fields onto
+#' sd2R's type vocabulary. Pure R, no weights read.
+#' @param path Path to the model file
+#' @return Model type string, or \code{NULL} if not detectable
+#' @keywords internal
+.detect_model_type_config <- function(path) {
+  cfg <- file.path(dirname(path), "config.json")
+  if (!file.exists(cfg)) return(NULL)
+  if (!requireNamespace("jsonlite", quietly = TRUE)) return(NULL)
+  j <- tryCatch(jsonlite::fromJSON(cfg), error = function(e) NULL)
+  if (is.null(j)) return(NULL)
+  hay <- tolower(paste(c(j$model_type, j$architectures, j[["_class_name"]]),
+                       collapse = " "))
+  if (!nzchar(hay)) return(NULL)
+  if (grepl("flux", hay))                 return("flux")
+  if (grepl("sd3|stablediffusion3|mmdit", hay)) return("sd3")
+  if (grepl("xl|sdxl", hay))              return("sdxl")
+  if (grepl("v2|sd2", hay))               return("sd2")
+  if (grepl("v1|sd1|stablediffusion", hay)) return("sd1")
+  NULL
+}
+
+#' Resolve model_type, including the "auto" detection hierarchy
+#'
+#' When \code{model_type == "auto"}, tries, in order: GGUF KV metadata
+#' (\code{\link{.detect_model_type_gguf}}, currently a hook), a sibling
+#' \code{config.json} (\code{\link{.detect_model_type_config}}), then the
+#' filename heuristic (\code{\link{.guess_model_type}}). If all fail it errors
+#' with a hint to set \code{model_type} explicitly rather than guessing.
+#' @param model_type User-supplied model type ("auto" triggers detection)
+#' @param path Path used for detection (model_path or diffusion_model_path)
+#' @return A concrete model type string
+#' @keywords internal
+.resolve_model_type <- function(model_type, path) {
+  if (!identical(model_type, "auto")) return(model_type)
+  if (is.null(path) || !nzchar(path)) {
+    stop("model_type = \"auto\" needs a model path to detect from. ",
+         "Pass model_path/diffusion_model_path, or set model_type explicitly.",
+         call. = FALSE)
+  }
+  detected <- .detect_model_type_gguf(path)
+  if (is.null(detected)) detected <- .detect_model_type_config(path)
+  if (is.null(detected)) {
+    g <- .guess_model_type(basename(path))
+    if (!identical(g, "unknown")) detected <- g
+  }
+  if (is.null(detected)) {
+    stop("Cannot detect model_type from '", basename(path), "'. ",
+         "Set it explicitly, e.g. model_type = \"flux\" ",
+         "(one of: sd1, sd2, sdxl, flux, sd3).", call. = FALSE)
+  }
+  detected
+}
+
 #' Guess component role from filename
 #' @param filename File basename
 #' @return Character: "diffusion", "vae", "clip_l", "clip_g", "t5xxl",
