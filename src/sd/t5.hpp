@@ -468,7 +468,7 @@ struct T5Embedder {
                const String2TensorStorage& tensor_storage_map = {},
                const std::string prefix                       = "",
                bool is_umt5                                   = false)
-        : model(backend, params_backend, tensor_storage_map, prefix, is_umt5), tokenizer(is_umt5) {
+        : tokenizer(is_umt5), model(backend, params_backend, tensor_storage_map, prefix, is_umt5) {
     }
 
     void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) {

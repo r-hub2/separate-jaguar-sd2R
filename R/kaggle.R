@@ -60,8 +60,9 @@
 #' are supported.
 #'
 #' @param handle Model handle in kagglehub form
-#'   \code{"owner/model/framework/variation"}, e.g.
-#'   \code{"lbsbmsu/flux-2/gguf/default"}.
+#'   \code{"owner/model/framework/variation"}. Defaults to
+#'   \code{"lbsbmsu/flux-2/gguf/default"} -- a ready-to-use FLUX 2 (GGUF) model,
+#'   so newcomers can call \code{sd_download_model(dest = "models/flux2")}.
 #' @param dest Destination directory for the unpacked files. Created if it does
 #'   not exist. Required.
 #' @param version Integer version number. If \code{NULL} (default) the latest
@@ -71,8 +72,8 @@
 #' @param verbose Logical; print progress messages. Defaults to \code{FALSE}.
 #' @return The path to \code{dest} (invisibly), containing the model files.
 #' @export
-sd_download_model <- function(handle, dest, version = NULL,
-                              files = NULL, verbose = FALSE) {
+sd_download_model <- function(handle = "lbsbmsu/flux-2/gguf/default", dest,
+                              version = NULL, files = NULL, verbose = FALSE) {
   if (missing(dest) || !is.character(dest) || length(dest) != 1L || !nzchar(dest)) {
     stop("'dest' must be a single non-empty directory path.", call. = FALSE)
   }

@@ -286,10 +286,10 @@ public:
                    int64_t context_dim,
                    int64_t n_head,
                    int64_t d_head)
-        : n_head(n_head),
-          d_head(d_head),
-          query_dim(query_dim),
-          context_dim(context_dim) {
+        : query_dim(query_dim),
+          context_dim(context_dim),
+          n_head(n_head),
+          d_head(d_head) {
         int64_t inner_dim = d_head * n_head;
         if (context_dim == 320 && d_head == 320) {
             // LOG_DEBUG("CrossAttention: temp set dim to 1024 for sdxs_09");

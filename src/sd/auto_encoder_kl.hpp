@@ -670,7 +670,7 @@ struct AutoEncoderKL : public VAE {
                   bool decode_only       = false,
                   bool use_video_decoder = false,
                   SDVersion version      = VERSION_SD1)
-        : decode_only(decode_only), VAE(version, backend, params_backend) {
+        : VAE(version, backend, params_backend), decode_only(decode_only) {
         if (sd_version_is_sd1(version) || sd_version_is_sd2(version)) {
             scale_factor = 0.18215f;
             shift_factor = 0.f;

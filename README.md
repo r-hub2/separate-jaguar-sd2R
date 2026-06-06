@@ -46,7 +46,23 @@ R  →  sd2R  →  ggmlR  →  ggml  →  Vulkan  →  GPU
 Launch an interactive web interface for image generation:
 
 ```r
-sd_app(model_dir = "/path/to/models")
+# From an R session
+sd_app()                                # random port, opens browser
+sd_app(model_dir = "/path/to/models")   # pre-scan a model folder
+sd_app(port = 3838, host = "127.0.0.1") # fixed port/host
+```
+
+From the terminal (one-liners):
+
+```bash
+# Simplest
+Rscript -e 'sd2R::sd_app()'
+
+# Fixed port + local host, open browser
+Rscript -e 'sd2R::sd_app(port = 3838, host = "127.0.0.1", launch.browser = TRUE)'
+
+# Equivalent low-level call (no sd2R helpers)
+Rscript -e "shiny::runApp(system.file('shiny/sd2R_app', package = 'sd2R'), port = 3838, host = '127.0.0.1', launch.browser = TRUE)"
 ```
 
 Features:
@@ -73,6 +89,20 @@ pipe <- sd_load_pipeline("my_pipeline.json")
 ctx <- sd_ctx("model.safetensors")
 sd_run_pipeline(pipe, ctx, upscaler_ctx = upscaler)
 ```
+
+## Quick Start: Download a Ready-to-Use FLUX 2 Model
+
+New to sd2R? Grab a ready-made FLUX 2 model in one line — no Kaggle account, no Python, no manual file juggling. `sd_download_model()` downloads the bundle from a public [Kaggle](https://www.kaggle.com/models) dataset and unpacks it for you:
+
+```r
+# Download FLUX 2 (GGUF) into ./models/flux2
+sd_download_model(dest = "models/flux2", verbose = TRUE)
+
+# Then launch the GUI pointed at that folder
+sd_app(model_dir = "models/flux2")
+```
+
+That's it — the app auto-detects the model and you can start generating. Re-running `sd_download_model()` is safe: it skips the download if the folder is already populated.
 
 ## Implementation Details
 

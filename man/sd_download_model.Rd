@@ -4,12 +4,19 @@
 \alias{sd_download_model}
 \title{Download a Stable Diffusion model from Kaggle Models}
 \usage{
-sd_download_model(handle, dest, version = NULL, files = NULL, verbose = FALSE)
+sd_download_model(
+  handle = "lbsbmsu/flux-2/gguf/default",
+  dest,
+  version = NULL,
+  files = NULL,
+  verbose = FALSE
+)
 }
 \arguments{
 \item{handle}{Model handle in kagglehub form
-\code{"owner/model/framework/variation"}, e.g.
-\code{"lbsbmsu/flux-2/gguf/default"}.}
+\code{"owner/model/framework/variation"}. Defaults to
+\code{"lbsbmsu/flux-2/gguf/default"} -- a ready-to-use FLUX 2 (GGUF) model,
+so newcomers can call \code{sd_download_model(dest = "models/flux2")}.}
 
 \item{dest}{Destination directory for the unpacked files. Created if it does
 not exist. Required.}

@@ -786,9 +786,9 @@ namespace LLM {
     public:
         Attention(const LLMParams& params)
             : arch(params.arch),
+              head_dim(params.head_dim),
               num_heads(params.num_heads),
               num_kv_heads(params.num_kv_heads),
-              head_dim(params.head_dim),
               qk_norm(params.qk_norm),
               max_position_embeddings(params.max_position_embeddings),
               rope_thetas(params.rope_thetas),

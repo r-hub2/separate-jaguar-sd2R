@@ -82,7 +82,7 @@ Suggests: testthat (>= 3.0.0), callr, png, plumber, drogonR, withr
 RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-06-06 18:05:16 UTC; yuri
+Packaged: 2026-06-06 18:36:00 UTC; yuri
 Author: Yuri Baramykov [aut, cre] (<https://orcid.org/0009-0000-7627-4217>),
   Georgi Gerganov [ctb, cph] (Author of the GGML library),
   leejet [ctb, cph] (Author of stable-diffusion.cpp),

@@ -628,9 +628,9 @@ struct TinyImageAutoEncoder : public VAE {
                          const std::string prefix,
                          bool decoder_only = true,
                          SDVersion version = VERSION_SD1)
-        : decode_only(decoder_only),
+        : VAE(version, backend, params_backend),
           taesd(decoder_only, version),
-          VAE(version, backend, params_backend) {
+          decode_only(decoder_only) {
         scale_input = false;
         taesd.init(params_ctx, tensor_storage_map, prefix);
     }
@@ -691,8 +691,8 @@ struct TinyVideoAutoEncoder : public VAE {
                          const std::string prefix,
                          bool decoder_only = true,
                          SDVersion version = VERSION_WAN2)
-        : decode_only(decoder_only),
-          VAE(version, backend, params_backend) {
+        : VAE(version, backend, params_backend),
+          decode_only(decoder_only) {
         for (auto tensor_storage : tensor_storage_map) {
             if (tensor_storage.first.find(prefix + ".3.conv.6.weight") != std::string::npos) {
                 is_wide = true;

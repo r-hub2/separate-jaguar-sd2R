@@ -63,7 +63,7 @@ protected:
 
 public:
     VAE(SDVersion version, ggml_backend_t backend, ggml_backend_t params_backend)
-        : version(version), GGMLRunner(backend, params_backend) {}
+        : GGMLRunner(backend, params_backend), version(version) {}
 
     int get_scale_factor() {
         int scale_factor = 8;
