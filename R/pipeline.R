@@ -10,6 +10,10 @@
 #' @param clip_l_path Optional path to CLIP-L model
 #' @param clip_g_path Optional path to CLIP-G model
 #' @param t5xxl_path Optional path to T5-XXL model
+#' @param llm_path Optional path to an LLM text encoder (Qwen3 / Mistral-Small).
+#'   Required for models that use an LLM conditioner, e.g. FLUX.2 Klein (Qwen3),
+#'   FLUX.2 (Mistral-Small), Z-Image and Qwen-Image. Loaded into the
+#'   \code{text_encoders.llm} slot.
 #' @param diffusion_model_path Optional path to separate diffusion model
 #' @param control_net_path Optional path to ControlNet model
 #' @param n_threads Number of CPU threads (0 = auto-detect)
@@ -21,6 +25,22 @@
 #'   not reuse the context. Default is FALSE.
 #' @param keep_clip_on_cpu Keep CLIP model on CPU even when using GPU
 #' @param keep_vae_on_cpu Keep VAE on CPU even when using GPU
+#' @param offload_params_to_cpu Keep model weights in CPU RAM and stream them to
+#'   the GPU on demand during compute (default FALSE). Lowers VRAM usage at the
+#'   cost of CPU<->GPU transfers each step. Use when the model does not fit in
+#'   GPU memory.
+#' @param max_vram GiB budget for graph-cut segmented parameter offload
+#'   (default 0 = disabled). A positive value caps GPU memory used by the compute
+#'   graph; \code{-1} means "auto" (free VRAM minus ~1 GiB). Required for
+#'   \code{stream_layers} to take effect.
+#' @param stream_layers Enable residency + prefetch streaming of layers on top of
+#'   \code{max_vram} (default FALSE). Has no effect unless \code{max_vram} is set
+#'   (a non-zero budget); automatically disabled otherwise.
+#' @param enable_mmap Memory-map model weights from disk instead of reading them
+#'   into a malloc'd buffer (default FALSE). Lowers RAM footprint for large
+#'   models (e.g. Flux); pages are loaded on demand by the OS and shared across
+#'   processes. Ignored for zip-archived weights. May slow the first generation
+#'   slightly as pages fault in.
 #' @param vae_conv_direct Use direct Conv2d implementation in VAE (default TRUE).
 #'   Faster on GPU; skips im2col and uses direct convolution kernels.
 #' @param diffusion_conv_direct Use direct Conv2d in diffusion model (default FALSE).
@@ -30,9 +50,9 @@
 #' @param rng_type RNG type (see \code{RNG_TYPE})
 #' @param prediction Prediction type override (see \code{PREDICTION}), NULL = auto
 #' @param lora_apply_mode LoRA application mode (see \code{LORA_APPLY_MODE})
-#' @param flow_shift Flow shift value for Flux models
 #' @param model_type Model architecture hint: \code{"sd1"}, \code{"sd2"},
-#'   \code{"sdxl"}, \code{"flux"}, \code{"sd3"}, or \code{"auto"}. Used by
+#'   \code{"sdxl"}, \code{"flux"}, \code{"flux2"}, \code{"sd3"}, or
+#'   \code{"auto"}. Used by
 #'   \code{\link{sd_generate}} to determine native resolution and tile sizes.
 #'   With \code{"auto"}, the type is detected from a sibling \code{config.json}
 #'   then the filename (GGUF-metadata detection is a future hook); detection
@@ -62,6 +82,14 @@
 #' @param vae_gpu Vulkan GPU device index for VAE encoder/decoder.
 #'   Default \code{-1} (same device as diffusion).
 #'   Overrides \code{device_layout}.
+#' @param meta_backend Logical flag to run the diffusion model through the ggml
+#'   meta backend ("second path", multi-GPU tensor split across all available
+#'   GPUs). Requires meta-backend support compiled in at install time (ggmlR
+#'   >= 0.7.8 exporting \code{ggml_backend_meta_device}); if the build lacks it,
+#'   a warning is emitted and the normal single-backend path is used. Default
+#'   \code{FALSE} keeps existing behaviour unchanged. Distinct from
+#'   \code{diffusion_gpu}/\code{vae_gpu} (per-component placement) and
+#'   \code{sd_generate_multi_gpu()} (per-prompt batch parallelism).
 #' @param tensor_type_rules Optional per-component weight type override, as a
 #'   comma-separated string of \code{pattern=type} rules. Each pattern is a
 #'   regex matched against tensor names; the first match wins. Use this to
@@ -90,6 +118,7 @@ sd_ctx <- function(model_path = NULL,
                    clip_l_path = NULL,
                    clip_g_path = NULL,
                    t5xxl_path = NULL,
+                   llm_path = NULL,
                    diffusion_model_path = NULL,
                    control_net_path = NULL,
                    n_threads = 0L,
@@ -99,19 +128,23 @@ sd_ctx <- function(model_path = NULL,
                    free_params_immediately = FALSE,
                    keep_clip_on_cpu = FALSE,
                    keep_vae_on_cpu = FALSE,
+                   offload_params_to_cpu = FALSE,
+                   max_vram = 0,
+                   stream_layers = FALSE,
+                   enable_mmap = FALSE,
                    vae_conv_direct = TRUE,
                    diffusion_conv_direct = FALSE,
                    diffusion_flash_attn = TRUE,
                    rng_type = RNG_TYPE$CUDA,
                    prediction = NULL,
                    lora_apply_mode = LORA_APPLY_MODE$AUTO,
-                   flow_shift = 0.0,
                    model_type = "sd1",
                    vram_gb = NULL,
                    device_layout = "mono",
                    diffusion_gpu = -1L,
                    clip_gpu = -1L,
                    vae_gpu = -1L,
+                   meta_backend = FALSE,
                    verbose = FALSE) {
 
   sd_set_verbose(verbose)
@@ -123,7 +156,8 @@ sd_ctx <- function(model_path = NULL,
     stop("Either model_path or diffusion_model_path must be provided", call. = FALSE)
   }
   model_type <- match.arg(model_type,
-                          c("sd1", "sd2", "sdxl", "flux", "sd3", "auto"))
+                          c("sd1", "sd2", "sdxl", "flux", "flux2", "sd3",
+                            "auto"))
   if (identical(model_type, "auto")) {
     detect_path <- if (!is.null(model_path)) model_path else diffusion_model_path
     model_type <- .resolve_model_type("auto", detect_path)
@@ -138,12 +172,15 @@ sd_ctx <- function(model_path = NULL,
     free_params_immediately = free_params_immediately,
     keep_clip_on_cpu = keep_clip_on_cpu,
     keep_vae_on_cpu = keep_vae_on_cpu,
+    offload_params_to_cpu = offload_params_to_cpu,
+    max_vram = as.numeric(max_vram),
+    stream_layers = stream_layers,
+    enable_mmap = enable_mmap,
     vae_conv_direct = vae_conv_direct,
     diffusion_conv_direct = diffusion_conv_direct,
     diffusion_flash_attn = diffusion_flash_attn,
     rng_type = as.integer(rng_type),
-    lora_apply_mode = as.integer(lora_apply_mode),
-    flow_shift = as.numeric(flow_shift)
+    lora_apply_mode = as.integer(lora_apply_mode)
   )
 
   # Optional string params (paths — normalized)
@@ -153,6 +190,7 @@ sd_ctx <- function(model_path = NULL,
     clip_l_path = clip_l_path,
     clip_g_path = clip_g_path,
     t5xxl_path = t5xxl_path,
+    llm_path = llm_path,
     diffusion_model_path = diffusion_model_path,
     control_net_path = control_net_path
   )
@@ -179,6 +217,21 @@ sd_ctx <- function(model_path = NULL,
   if (layout$vae >= 0L)       params$vae_gpu_device       <- layout$vae
   if (layout$clip_on_cpu)     params$keep_clip_on_cpu     <- TRUE
   if (layout$vae_on_cpu)      params$keep_vae_on_cpu      <- TRUE
+
+  # "Second path": run diffusion through the ggml meta backend (on/off flag).
+  # Default FALSE => normal single-backend path (full backward compatibility).
+  # If meta is unavailable in the linked ggmlR, C++ falls back to the normal path.
+  if (isTRUE(meta_backend)) {
+    if (isTRUE(sd_meta_backend_available())) {
+      params$meta_backend <- TRUE
+      if (verbose) message("Meta backend ON (multi-GPU; falls back to single if unavailable)")
+    } else {
+      warning("meta_backend = TRUE but this sd2R build was compiled without ",
+              "meta backend support (ggmlR lacks ggml_backend_meta_device; ",
+              "need ggmlR >= 0.7.8). Using the normal single-backend path.",
+              call. = FALSE)
+    }
+  }
 
   ctx <- sd_create_context(params)
   attr(ctx, "model_type") <- model_type
@@ -225,6 +278,9 @@ sd_ctx <- function(model_path = NULL,
 #' @param scheduler Scheduler type (see \code{SCHEDULER})
 #' @param clip_skip Number of CLIP layers to skip (-1 = auto)
 #' @param eta Eta parameter for DDIM-like samplers
+#' @param flow_shift Flow shift for flow-matching models (Flux, SD3). \code{NULL}
+#'   (default) lets the model pick an architecture-specific value; set a numeric
+#'   value to override. Ignored by non-flow models.
 #' @param hr_strength Denoising strength for highres fix refinement pass
 #'   (default 0.4). Only used when auto-routing selects highres fix.
 #' @param vae_mode VAE processing mode: \code{"normal"}, \code{"tiled"}, or
@@ -278,6 +334,7 @@ sd_generate <- function(ctx,
                         scheduler = SCHEDULER$DISCRETE,
                         clip_skip = -1L,
                         eta = 0.0,
+                        flow_shift = NULL,
                         hr_strength = 0.4,
                         vae_mode = "auto",
                         vae_tile_size = 64L,
@@ -313,6 +370,7 @@ sd_generate <- function(ctx,
     scheduler        <- pv("scheduler",        scheduler)
     clip_skip        <- pv("clip_skip",        clip_skip)
     eta              <- pv("eta",              eta)
+    flow_shift       <- pv("flow_shift",       flow_shift)
     hr_strength      <- pv("hr_strength",      hr_strength)
     vae_mode         <- pv("vae_mode",         vae_mode)
     vae_tile_size    <- pv("vae_tile_size",    vae_tile_size)
@@ -355,8 +413,8 @@ sd_generate <- function(ctx,
   height <- as.integer(height)
   model_type <- attr(ctx, "model_type") %||% "sd1"
 
-  # Flux uses guidance-distilled models; cfg_scale should default to 1.0
-  if (model_type == "flux" && cfg_scale == 7.0) {
+  # Flux / Flux.2 use guidance-distilled models; cfg_scale should default to 1.0
+  if (model_type %in% c("flux", "flux2") && cfg_scale == 7.0) {
     cfg_scale <- 1.0
   }
   is_img2img <- !is.null(init_image)
@@ -378,6 +436,7 @@ sd_generate <- function(ctx,
                        batch_count = batch_count,
                        scheduler = scheduler, clip_skip = clip_skip,
                        strength = strength, eta = eta,
+                       flow_shift = flow_shift,
                        vae_mode = vae_mode,
                        vae_tile_size = vae_tile_size,
                        vae_tile_overlap = vae_tile_overlap,
@@ -394,6 +453,7 @@ sd_generate <- function(ctx,
                  batch_count = batch_count,
                  scheduler = scheduler, clip_skip = clip_skip,
                  strength = strength, eta = eta,
+                 flow_shift = flow_shift,
                  vae_mode = vae_mode,
                  vae_tile_size = vae_tile_size,
                  vae_tile_overlap = vae_tile_overlap,
@@ -409,7 +469,8 @@ sd_generate <- function(ctx,
                             sample_steps = sample_steps,
                             cfg_scale = cfg_scale, seed = seed,
                             scheduler = scheduler, clip_skip = clip_skip,
-                            eta = eta, hr_strength = hr_strength,
+                            eta = eta, flow_shift = flow_shift,
+                            hr_strength = hr_strength,
                             vae_mode = vae_mode,
                             vae_tile_size = vae_tile_size,
                             vae_tile_overlap = vae_tile_overlap,
@@ -425,7 +486,8 @@ sd_generate <- function(ctx,
                        cfg_scale = cfg_scale, seed = seed,
                        batch_count = batch_count,
                        scheduler = scheduler, clip_skip = clip_skip,
-                       eta = eta, vae_mode = vae_mode,
+                       eta = eta, flow_shift = flow_shift,
+                       vae_mode = vae_mode,
                        vae_tile_size = vae_tile_size,
                        vae_tile_overlap = vae_tile_overlap,
                        cache_mode = cache_mode,
@@ -439,7 +501,8 @@ sd_generate <- function(ctx,
                  cfg_scale = cfg_scale, seed = seed,
                  batch_count = batch_count,
                  scheduler = scheduler, clip_skip = clip_skip,
-                 eta = eta, vae_mode = vae_mode,
+                 eta = eta, flow_shift = flow_shift,
+                 vae_mode = vae_mode,
                  vae_tile_size = vae_tile_size,
                  vae_tile_overlap = vae_tile_overlap,
                  cache_mode = cache_mode,
@@ -527,6 +590,147 @@ sd_generate <- function(ctx,
   params
 }
 
+#' Build an executable step plan for sd_generate (async orchestration)
+#'
+#' Mirrors the routing logic of \code{\link{sd_generate}} (cfg auto-1.0 for
+#' guidance-distilled Flux/Flux.2, strategy selection, VAE tiling resolution)
+#' but instead of running the pipeline, returns a list of \emph{steps}. Each
+#' step is one of:
+#' \itemize{
+#'   \item \code{type = "gen"}  — a single \code{sd_generate_async()} call.
+#'     Carries a ready-to-use \code{params} list, \code{width}/\code{height},
+#'     a \code{label}, and \code{uses_init} (whether it consumes the previous
+#'     step's image as \code{init_image}).
+#'   \item \code{type = "upscale"} — a synchronous R-side resize/ESRGAN step
+#'     run between two gen steps. Carries \code{width}/\code{height},
+#'     \code{upscaler}, \code{upscale_factor}.
+#' }
+#' The final step (the image returned to the caller) has \code{final = TRUE}.
+#'
+#' This lets the Shiny GUI drive the multi-step highres-fix pipeline through the
+#' single-shot async engine: run a gen step, poll it, feed its result into the
+#' next step, all without blocking the R session.
+#'
+#' @inheritParams sd_generate
+#' @return List of step descriptors (see above).
+#' @keywords internal
+.sd_generate_plan <- function(ctx, prompt,
+                              negative_prompt = "",
+                              width = 512L, height = 512L,
+                              init_image = NULL,
+                              strength = 0.75,
+                              sample_method = SAMPLE_METHOD$EULER,
+                              sample_steps = 20L,
+                              cfg_scale = 7.0,
+                              seed = 42L,
+                              batch_count = 1L,
+                              scheduler = SCHEDULER$DISCRETE,
+                              clip_skip = -1L,
+                              eta = 0.0,
+                              flow_shift = NULL,
+                              hr_strength = 0.4,
+                              hr_steps = NULL,
+                              upscaler = NULL,
+                              upscale_factor = 4L,
+                              vae_mode = "auto",
+                              vae_auto_threshold = 1048576L,
+                              vae_tile_size = 64L,
+                              vae_tile_overlap = 0.25,
+                              cache_mode = c("off", "easy", "ucache"),
+                              cache_config = NULL) {
+  if (is.character(sample_method)) sample_method <- SAMPLE_METHOD[[sample_method]]
+  if (is.character(scheduler))     scheduler     <- SCHEDULER[[scheduler]]
+  width  <- as.integer(width)
+  height <- as.integer(height)
+
+  model_type <- attr(ctx, "model_type") %||% "sd1"
+  # Flux / Flux.2 are guidance-distilled: cfg_scale must be ~1.0, not 7.0.
+  if (model_type %in% c("flux", "flux2") && cfg_scale == 7.0) cfg_scale <- 1.0
+
+  is_img2img      <- !is.null(init_image)
+  vae_decode_only <- attr(ctx, "vae_decode_only") %||% TRUE
+  strategy <- .select_strategy(width, height, ctx, model_type, is_img2img,
+                               vae_decode_only)
+
+  # Helper: assemble a single-shot params list for sd_generate_async, replicating
+  # the bodies of sd_txt2img / sd_img2img / sd_txt2img_tiled.
+  mk_gen <- function(w, h, steps, strength_v, tiled_sampling = FALSE,
+                     sample_tile_size = NULL, sample_tile_overlap = 0.25) {
+    vae_tiling_resolved <- .resolve_vae_tiling(
+      vae_mode = vae_mode, vae_tiling = NULL, width = w, height = h,
+      vae_auto_threshold = vae_auto_threshold, ctx = ctx, batch = batch_count)
+    p <- list(
+      prompt = prompt, negative_prompt = negative_prompt,
+      width = as.integer(w), height = as.integer(h),
+      sample_method = as.integer(sample_method),
+      sample_steps = as.integer(steps),
+      cfg_scale = as.numeric(cfg_scale), seed = as.integer(seed),
+      batch_count = as.integer(batch_count), scheduler = as.integer(scheduler),
+      clip_skip = as.integer(clip_skip), strength = as.numeric(strength_v),
+      eta = as.numeric(eta), control_strength = 0.9,
+      vae_tiling = vae_tiling_resolved,
+      vae_tile_size = as.integer(vae_tile_size),
+      vae_tile_overlap = as.numeric(vae_tile_overlap))
+    if (tiled_sampling) {
+      if (is.null(sample_tile_size))
+        sample_tile_size <- .native_latent_tile_size(model_type)
+      p$tiled_sampling <- TRUE
+      p$sample_tile_size <- as.integer(sample_tile_size)
+      p$sample_tile_overlap <- as.numeric(sample_tile_overlap)
+    }
+    if (!is.null(flow_shift)) p$flow_shift <- as.numeric(flow_shift)
+    .apply_cache_params(p, cache_mode, cache_config)
+  }
+
+  gen_step <- function(w, h, steps, strength_v, tiled_sampling = FALSE,
+                       uses_init = FALSE, label = "Generating", final = FALSE) {
+    list(type = "gen", label = label, width = as.integer(w),
+         height = as.integer(h), uses_init = uses_init, final = final,
+         params = mk_gen(w, h, steps, strength_v, tiled_sampling = tiled_sampling))
+  }
+
+  # --- img2img (single gen step; tiled vs direct only changes sample tiling) ---
+  if (is_img2img) {
+    return(list(gen_step(width, height, sample_steps, strength,
+                         tiled_sampling = (strategy == "tiled"),
+                         uses_init = TRUE, label = "img2img", final = TRUE)))
+  }
+
+  # --- txt2img direct / tiled: a single gen step ---
+  if (strategy != "highres_fix") {
+    return(list(gen_step(width, height, sample_steps, 0.0,
+                         tiled_sampling = (strategy == "tiled"),
+                         label = "Generating", final = TRUE)))
+  }
+
+  # --- highres_fix: base gen -> upscale (R-side) -> img2img refine ---
+  if (is.null(hr_steps)) hr_steps <- sample_steps
+  native_px <- .native_tile_size(model_type)
+  aspect <- width / height
+  if (aspect >= 1) {
+    base_w <- native_px
+    base_h <- as.integer(round(native_px / aspect / 8) * 8)
+  } else {
+    base_h <- native_px
+    base_w <- as.integer(round(native_px * aspect / 8) * 8)
+  }
+  base_w <- max(base_w, 64L); base_h <- max(base_h, 64L)
+
+  # DiT denoisers (Flux/Flux.2/SD3) can't use tiled sampling for the refine pass.
+  refine_tiled <- !(model_type %in% c("flux", "flux2", "sd3"))
+
+  list(
+    gen_step(base_w, base_h, sample_steps, 0.0,
+             label = "Highres: base", final = FALSE),
+    list(type = "upscale", label = "Highres: upscale",
+         width = width, height = height,
+         upscaler = upscaler, upscale_factor = as.integer(upscale_factor)),
+    gen_step(width, height, hr_steps, hr_strength,
+             tiled_sampling = refine_tiled, uses_init = TRUE,
+             label = "Highres: refine", final = TRUE)
+  )
+}
+
 #' Generate images from text prompt
 #'
 #' @param ctx SD context created by \code{\link{sd_ctx}}
@@ -542,6 +746,9 @@ sd_generate <- function(ctx,
 #' @param scheduler Scheduler type (see \code{SCHEDULER})
 #' @param clip_skip Number of CLIP layers to skip (-1 = auto)
 #' @param eta Eta parameter for DDIM-like samplers
+#' @param flow_shift Flow shift for flow-matching models (Flux, SD3). \code{NULL}
+#'   (default) lets the model pick an architecture-specific value; set a numeric
+#'   value to override. Ignored by non-flow models.
 #' @param control_image Optional control image for ControlNet (sd_image format)
 #' @param control_strength ControlNet strength (default 0.9)
 #' @param vae_mode VAE processing mode: \code{"normal"} (no tiling),
@@ -585,6 +792,7 @@ sd_txt2img <- function(ctx,
                        scheduler = SCHEDULER$DISCRETE,
                        clip_skip = -1L,
                        eta = 0.0,
+                       flow_shift = NULL,
                        control_image = NULL,
                        control_strength = 0.9,
                        vae_mode = "auto",
@@ -643,6 +851,9 @@ sd_txt2img <- function(ctx,
   if (!is.null(vae_tile_rel_y)) {
     params$vae_tile_rel_y <- as.numeric(vae_tile_rel_y)
   }
+  if (!is.null(flow_shift)) {
+    params$flow_shift <- as.numeric(flow_shift)
+  }
   if (!is.null(control_image)) {
     params$control_image <- control_image
   }
@@ -657,12 +868,18 @@ sd_txt2img <- function(ctx,
 #' @param init_image Init image in sd_image format. Use \code{\link{sd_load_image}}
 #'   to load from file.
 #' @param strength Denoising strength (0.0 = no change, 1.0 = full denoise, default 0.75)
+#' @param mask Optional inpainting mask. A PNG file path, a numeric matrix
+#'   \code{[H, W]} (values in 0..1 or 0..255), or a 1-channel SD image list.
+#'   White (255) = regenerate that region, black (0) = keep the original. Must
+#'   match the init image dimensions. When \code{NULL} (default) the whole image
+#'   is denoised (plain img2img).
 #' @return List of SD images
 #' @export
 sd_img2img <- function(ctx,
                        prompt,
                        init_image,
                        negative_prompt = "",
+                       mask = NULL,
                        width = NULL,
                        height = NULL,
                        sample_method = SAMPLE_METHOD$EULER,
@@ -674,6 +891,7 @@ sd_img2img <- function(ctx,
                        clip_skip = -1L,
                        strength = 0.75,
                        eta = 0.0,
+                       flow_shift = NULL,
                        vae_mode = "auto",
                        vae_auto_threshold = 1048576L,
                        vae_tile_size = 64L,
@@ -705,6 +923,18 @@ sd_img2img <- function(ctx,
   if (is.null(width)) width <- init_image$width
   if (is.null(height)) height <- init_image$height
 
+  mask_image <- NULL
+  if (!is.null(mask)) {
+    mask_image <- .sd_to_mask_image(mask)
+    if (mask_image$width != init_image$width ||
+        mask_image$height != init_image$height) {
+      stop(sprintf(
+        "mask size (%dx%d) must match init_image size (%dx%d).",
+        mask_image$width, mask_image$height,
+        init_image$width, init_image$height), call. = FALSE)
+    }
+  }
+
   vae_tiling_resolved <- .resolve_vae_tiling(
     vae_mode = vae_mode,
     vae_tiling = vae_tiling,
@@ -730,6 +960,7 @@ sd_img2img <- function(ctx,
     clip_skip = as.integer(clip_skip),
     strength = as.numeric(strength),
     eta = as.numeric(eta),
+    mask_image = mask_image,
     vae_tiling = vae_tiling_resolved,
     vae_tile_size = as.integer(vae_tile_size),
     vae_tile_overlap = as.numeric(vae_tile_overlap)
@@ -739,6 +970,9 @@ sd_img2img <- function(ctx,
   }
   if (!is.null(vae_tile_rel_y)) {
     params$vae_tile_rel_y <- as.numeric(vae_tile_rel_y)
+  }
+  if (!is.null(flow_shift)) {
+    params$flow_shift <- as.numeric(flow_shift)
   }
   params <- .apply_cache_params(params, cache_mode, cache_config)
 
@@ -786,6 +1020,7 @@ sd_txt2img_tiled <- function(ctx,
                               scheduler = SCHEDULER$DISCRETE,
                               clip_skip = -1L,
                               eta = 0.0,
+                              flow_shift = NULL,
                               vae_mode = "auto",
                               vae_auto_threshold = 1048576L,
                               vae_tile_size = 64L,
@@ -840,6 +1075,9 @@ sd_txt2img_tiled <- function(ctx,
   if (!is.null(vae_tile_rel_y)) {
     params$vae_tile_rel_y <- as.numeric(vae_tile_rel_y)
   }
+  if (!is.null(flow_shift)) {
+    params$flow_shift <- as.numeric(flow_shift)
+  }
   params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
@@ -873,6 +1111,7 @@ sd_img2img_tiled <- function(ctx,
                               clip_skip = -1L,
                               strength = 0.5,
                               eta = 0.0,
+                              flow_shift = NULL,
                               vae_mode = "auto",
                               vae_auto_threshold = 1048576L,
                               vae_tile_size = 64L,
@@ -927,6 +1166,9 @@ sd_img2img_tiled <- function(ctx,
     sample_tile_size = sample_tile_size,
     sample_tile_overlap = as.numeric(sample_tile_overlap)
   )
+  if (!is.null(flow_shift)) {
+    params$flow_shift <- as.numeric(flow_shift)
+  }
   params <- .apply_cache_params(params, cache_mode, cache_config)
 
   sd_generate_image(ctx, params)
@@ -962,6 +1204,7 @@ sd_highres_fix <- function(ctx,
                             scheduler = SCHEDULER$DISCRETE,
                             clip_skip = -1L,
                             eta = 0.0,
+                            flow_shift = NULL,
                             hr_strength = 0.4,
                             hr_steps = NULL,
                             sample_tile_size = NULL,
@@ -1004,6 +1247,7 @@ sd_highres_fix <- function(ctx,
                            scheduler = scheduler,
                            clip_skip = clip_skip,
                            eta = eta,
+                           flow_shift = flow_shift,
                            cache_mode = cache_mode,
                            cache_config = cache_config)
   base_img <- base_imgs[[1]]
@@ -1021,7 +1265,37 @@ sd_highres_fix <- function(ctx,
     upscaled <- .resize_sd_image(base_img, width, height)
   }
 
-  # Step 3: tiled img2img refinement
+  # Step 3: img2img refinement.
+  # Tiled sampling (MultiDiffusion) only works for convolutional UNets. DiT
+  # denoisers (Flux, Flux.2, SD3) patchify the latent and do not preserve the
+  # tile's spatial layout, so tiling the sampler produces garbage/black output.
+  # For those, refine with direct img2img (VAE tiling still applies).
+  if (model_type %in% c("flux", "flux2", "sd3")) {
+    message(sprintf("[highres_fix] Step 3: img2img (DiT, no tiled sampling) (strength=%.2f, steps=%d)",
+                    hr_strength, hr_steps))
+    result <- sd_img2img(ctx, prompt,
+                         init_image = upscaled,
+                         negative_prompt = negative_prompt,
+                         width = width,
+                         height = height,
+                         sample_method = sample_method,
+                         sample_steps = hr_steps,
+                         cfg_scale = cfg_scale,
+                         seed = seed,
+                         scheduler = scheduler,
+                         clip_skip = clip_skip,
+                         strength = hr_strength,
+                         eta = eta,
+                         flow_shift = flow_shift,
+                         vae_mode = vae_mode,
+                         vae_auto_threshold = vae_auto_threshold,
+                         vae_tile_size = vae_tile_size,
+                         vae_tile_overlap = vae_tile_overlap,
+                         cache_mode = cache_mode,
+                         cache_config = cache_config)
+    return(result[[1]])
+  }
+
   message(sprintf("[highres_fix] Step 3: tiled img2img (strength=%.2f, steps=%d)",
                   hr_strength, hr_steps))
   result <- sd_img2img_tiled(ctx, prompt,
@@ -1039,6 +1313,7 @@ sd_highres_fix <- function(ctx,
                               clip_skip = clip_skip,
                               strength = hr_strength,
                               eta = eta,
+                              flow_shift = flow_shift,
                               vae_mode = vae_mode,
                               vae_auto_threshold = vae_auto_threshold,
                               vae_tile_size = vae_tile_size,
@@ -1049,16 +1324,17 @@ sd_highres_fix <- function(ctx,
 }
 
 #' Get native latent tile size for a model type
-#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "sd3"
+#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "flux2", "sd3"
 #' @return Integer tile size in latent pixels
 #' @keywords internal
 .native_latent_tile_size <- function(model_type) {
   switch(model_type,
     sd1  = 64L,   # 64 * 8 = 512px
     sd2  = 64L,   # 64 * 8 = 512px
-    sdxl = 128L,  # 128 * 8 = 1024px
-    flux = 128L,
-    sd3  = 128L,
+    sdxl  = 128L,  # 128 * 8 = 1024px
+    flux  = 128L,
+    flux2 = 128L,
+    sd3   = 128L,
     64L
   )
 }
@@ -1281,16 +1557,17 @@ sd_txt2img_highres <- function(ctx,
 }
 
 #' Get native tile size for a model type
-#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "sd3"
+#' @param model_type One of "sd1", "sd2", "sdxl", "flux", "flux2", "sd3"
 #' @return Integer tile size in pixels
 #' @keywords internal
 .native_tile_size <- function(model_type) {
   switch(model_type,
     sd1  = 512L,
     sd2  = 512L,
-    sdxl = 1024L,
-    flux = 1024L,
-    sd3  = 1024L,
+    sdxl  = 1024L,
+    flux  = 1024L,
+    flux2 = 1024L,
+    sd3   = 1024L,
     768L
   )
 }
@@ -1520,6 +1797,10 @@ sd_convert <- function(input_path, output_path, output_type = SD_TYPE$F16,
     return(vae_mode == "tiled")
   }
 
+  # Optional diagnostics: set SD2R_DEBUG_VAE=1 to trace the auto decision.
+  # Helps localize why a large decode was (not) tiled (see highres_fix OOM).
+  .dbg <- nzchar(Sys.getenv("SD2R_DEBUG_VAE"))
+
   # --- auto mode: try VRAM-aware decision first ---
   if (!is.null(ctx)) {
     device <- attr(ctx, "vram_device") %||% 0L
@@ -1531,12 +1812,27 @@ sd_convert <- function(input_path, output_path, output_type = SD_TYPE$F16,
     if (!is.null(free_vram) && is.numeric(free_vram) && free_vram > 0) {
       required <- .estimate_vae_vram(width, height, model_type, batch) +
         system_reserve
-      return(required > free_vram)
+      decision <- required > free_vram
+      if (.dbg) {
+        message(sprintf(
+          "[vae_tiling] auto/VRAM: %dx%d %s dev=%d free=%.2fGB required=%.2fGB -> tiled=%s",
+          as.integer(width), as.integer(height), model_type, device,
+          free_vram / 1e9, required / 1e9, decision))
+      }
+      return(decision)
     }
   }
 
   # --- fallback: static pixel-area threshold ---
-  as.integer(width) * as.integer(height) >= as.numeric(vae_auto_threshold)
+  decision <- as.integer(width) * as.integer(height) >= as.numeric(vae_auto_threshold)
+  if (.dbg) {
+    message(sprintf(
+      "[vae_tiling] auto/pixel-area (no VRAM query): %dx%d area=%.0f threshold=%.0f -> tiled=%s",
+      as.integer(width), as.integer(height),
+      as.numeric(width) * as.numeric(height),
+      as.numeric(vae_auto_threshold), decision))
+  }
+  decision
 }
 
 #' Parallel generation across multiple GPUs
@@ -1562,6 +1858,7 @@ sd_convert <- function(input_path, output_path, output_type = SD_TYPE$F16,
 #' @param vae_path Path to VAE model
 #' @param clip_l_path Path to CLIP-L model
 #' @param t5xxl_path Path to T5-XXL model
+#' @param llm_path Path to an LLM text encoder (Qwen3 / Mistral), e.g. FLUX.2
 #' @param ... Additional arguments passed to \code{\link{sd_generate}}
 #' @return List of SD images, one per prompt, in original order.
 #' @note Release any existing SD context (\code{rm(ctx); gc()}) before calling
@@ -1602,6 +1899,7 @@ sd_generate_multi_gpu <- function(model_path = NULL,
                                   vae_path = NULL,
                                   clip_l_path = NULL,
                                   t5xxl_path = NULL,
+                                  llm_path = NULL,
                                   ...) {
   if (!requireNamespace("callr", quietly = TRUE)) {
     stop("Package 'callr' is required for multi-GPU generation. ",
@@ -1641,6 +1939,7 @@ sd_generate_multi_gpu <- function(model_path = NULL,
   if (!is.null(vae_path)) vae_path <- normalizePath(vae_path)
   if (!is.null(clip_l_path)) clip_l_path <- normalizePath(clip_l_path)
   if (!is.null(t5xxl_path)) t5xxl_path <- normalizePath(t5xxl_path)
+  if (!is.null(llm_path)) llm_path <- normalizePath(llm_path)
 
   # Capture extra args
   extra_args <- list(...)
@@ -1666,7 +1965,7 @@ sd_generate_multi_gpu <- function(model_path = NULL,
 
       job <- callr::r_bg(
         function(model_path, diffusion_model_path, vae_path, clip_l_path,
-                 t5xxl_path, prompt, negative_prompt, width, height, seed,
+                 t5xxl_path, llm_path, prompt, negative_prompt, width, height, seed,
                  model_type, vram_gb, vae_decode_only, dev, extra_args) {
           Sys.setenv(SD_VK_DEVICE = as.character(dev))
           library(sd2R)
@@ -1675,6 +1974,7 @@ sd_generate_multi_gpu <- function(model_path = NULL,
                         vae_path = vae_path,
                         clip_l_path = clip_l_path,
                         t5xxl_path = t5xxl_path,
+                        llm_path = llm_path,
                         model_type = model_type,
                         vram_gb = vram_gb,
                         vae_decode_only = vae_decode_only)
@@ -1692,6 +1992,7 @@ sd_generate_multi_gpu <- function(model_path = NULL,
           vae_path = vae_path,
           clip_l_path = clip_l_path,
           t5xxl_path = t5xxl_path,
+          llm_path = llm_path,
           prompt = prompts[idx],
           negative_prompt = negative_prompt,
           width = width, height = height, seed = seeds[idx],

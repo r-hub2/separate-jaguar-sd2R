@@ -11,6 +11,7 @@ sd_ctx(
   clip_l_path = NULL,
   clip_g_path = NULL,
   t5xxl_path = NULL,
+  llm_path = NULL,
   diffusion_model_path = NULL,
   control_net_path = NULL,
   n_threads = 0L,
@@ -20,19 +21,23 @@ sd_ctx(
   free_params_immediately = FALSE,
   keep_clip_on_cpu = FALSE,
   keep_vae_on_cpu = FALSE,
+  offload_params_to_cpu = FALSE,
+  max_vram = 0,
+  stream_layers = FALSE,
+  enable_mmap = FALSE,
   vae_conv_direct = TRUE,
   diffusion_conv_direct = FALSE,
   diffusion_flash_attn = TRUE,
   rng_type = RNG_TYPE$CUDA,
   prediction = NULL,
   lora_apply_mode = LORA_APPLY_MODE$AUTO,
-  flow_shift = 0,
   model_type = "sd1",
   vram_gb = NULL,
   device_layout = "mono",
   diffusion_gpu = -1L,
   clip_gpu = -1L,
   vae_gpu = -1L,
+  meta_backend = FALSE,
   verbose = FALSE
 )
 }
@@ -48,6 +53,11 @@ sd_ctx(
 \item{clip_g_path}{Optional path to CLIP-G model}
 
 \item{t5xxl_path}{Optional path to T5-XXL model}
+
+\item{llm_path}{Optional path to an LLM text encoder (Qwen3 / Mistral-Small).
+Required for models that use an LLM conditioner, e.g. FLUX.2 Klein (Qwen3),
+FLUX.2 (Mistral-Small), Z-Image and Qwen-Image. Loaded into the
+\code{text_encoders.llm} slot.}
 
 \item{diffusion_model_path}{Optional path to separate diffusion model}
 
@@ -79,6 +89,26 @@ not reuse the context. Default is FALSE.}
 
 \item{keep_vae_on_cpu}{Keep VAE on CPU even when using GPU}
 
+\item{offload_params_to_cpu}{Keep model weights in CPU RAM and stream them to
+the GPU on demand during compute (default FALSE). Lowers VRAM usage at the
+cost of CPU<->GPU transfers each step. Use when the model does not fit in
+GPU memory.}
+
+\item{max_vram}{GiB budget for graph-cut segmented parameter offload
+(default 0 = disabled). A positive value caps GPU memory used by the compute
+graph; \code{-1} means "auto" (free VRAM minus ~1 GiB). Required for
+\code{stream_layers} to take effect.}
+
+\item{stream_layers}{Enable residency + prefetch streaming of layers on top of
+\code{max_vram} (default FALSE). Has no effect unless \code{max_vram} is set
+(a non-zero budget); automatically disabled otherwise.}
+
+\item{enable_mmap}{Memory-map model weights from disk instead of reading them
+into a malloc'd buffer (default FALSE). Lowers RAM footprint for large
+models (e.g. Flux); pages are loaded on demand by the OS and shared across
+processes. Ignored for zip-archived weights. May slow the first generation
+slightly as pages fault in.}
+
 \item{vae_conv_direct}{Use direct Conv2d implementation in VAE (default TRUE).
 Faster on GPU; skips im2col and uses direct convolution kernels.}
 
@@ -94,10 +124,9 @@ GPU drivers or backends.}
 
 \item{lora_apply_mode}{LoRA application mode (see \code{LORA_APPLY_MODE})}
 
-\item{flow_shift}{Flow shift value for Flux models}
-
 \item{model_type}{Model architecture hint: \code{"sd1"}, \code{"sd2"},
-\code{"sdxl"}, \code{"flux"}, \code{"sd3"}, or \code{"auto"}. Used by
+\code{"sdxl"}, \code{"flux"}, \code{"flux2"}, \code{"sd3"}, or
+\code{"auto"}. Used by
 \code{\link{sd_generate}} to determine native resolution and tile sizes.
 With \code{"auto"}, the type is detected from a sibling \code{config.json}
 then the filename (GGUF-metadata detection is a future hook); detection
@@ -132,6 +161,15 @@ Overrides \code{device_layout}.}
 \item{vae_gpu}{Vulkan GPU device index for VAE encoder/decoder.
 Default \code{-1} (same device as diffusion).
 Overrides \code{device_layout}.}
+
+\item{meta_backend}{Logical flag to run the diffusion model through the ggml
+meta backend ("second path", multi-GPU tensor split across all available
+GPUs). Requires meta-backend support compiled in at install time (ggmlR
+>= 0.7.8 exporting \code{ggml_backend_meta_device}); if the build lacks it,
+a warning is emitted and the normal single-backend path is used. Default
+\code{FALSE} keeps existing behaviour unchanged. Distinct from
+\code{diffusion_gpu}/\code{vae_gpu} (per-component placement) and
+\code{sd_generate_multi_gpu()} (per-prompt batch parallelism).}
 
 \item{verbose}{If \code{TRUE}, print model loading progress and sampling
 steps. Default \code{FALSE}.}

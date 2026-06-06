@@ -29,13 +29,45 @@ test_that("param merge precedence: explicit > params > default", {
   expect_identical(pv("seed", 42L), 42L)            # default fallback
 })
 
-test_that(".detect_model_type_gguf is a NULL hook until ggmlR supports it", {
-  expect_null(.detect_model_type_gguf("anything.gguf"))
+test_that(".detect_model_type_gguf returns NULL for non-gguf or missing files", {
+  # Guards (no model / ggmlR needed): only .gguf files that exist are probed.
+  expect_null(.detect_model_type_gguf("model.safetensors")) # not a .gguf
+  expect_null(.detect_model_type_gguf(""))                  # empty path
+  expect_null(.detect_model_type_gguf("/no/such/file.gguf")) # missing file
+})
+
+test_that(".detect_model_type_gguf reads architecture from a real GGUF header", {
+  gguf <- Sys.getenv("SD2R_TEST_GGUF", "")
+  skip_if(gguf == "" || !file.exists(gguf),
+          "Set SD2R_TEST_GGUF to a .gguf file to run this test")
+  skip_if_not_installed("ggmlR")
+  skip_if(!"meta_only" %in% names(formals(ggmlR::gguf_load)),
+          "Installed ggmlR has no meta_only support")
+
+  # Header-only probe maps general.architecture onto sd2R's type vocabulary.
+  res <- .detect_model_type_gguf(gguf)
+  expect_true(is.null(res) || res %in% c("sd1", "sd2", "sdxl", "flux", "sd3"))
 })
 
 test_that("model_type=auto falls back to filename heuristic", {
   expect_identical(.resolve_model_type("auto", "/tmp/flux1-dev-Q4.gguf"), "flux")
   expect_identical(.resolve_model_type("auto", "/tmp/sd_xl_base.safetensors"), "sdxl")
+})
+
+test_that("FLUX.2 is detected from filename and not shadowed by flux", {
+  # flux2 must win over the generic "flux" match (order-sensitive).
+  expect_identical(.guess_model_type("flux2-klein-9B.gguf"), "flux2")
+  expect_identical(.guess_model_type("flux.2_base.safetensors"), "flux2")
+  expect_identical(.guess_model_type("flux-2-dev.gguf"), "flux2")
+  # plain flux1 must still resolve to "flux", never "flux2".
+  expect_identical(.guess_model_type("flux1-dev-Q4_K_S.gguf"), "flux")
+  expect_identical(.guess_model_type("flux-dev.safetensors"), "flux")
+  expect_identical(.resolve_model_type("auto", "/tmp/flux2-klein.gguf"), "flux2")
+})
+
+test_that("FLUX.2 has native tile/latent sizes (same as flux)", {
+  expect_identical(.native_tile_size("flux2"), 1024L)
+  expect_identical(.native_latent_tile_size("flux2"), 128L)
 })
 
 test_that("non-auto model_type passes through unchanged", {

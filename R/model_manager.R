@@ -64,10 +64,11 @@
 
 #' Guess model type from filename
 #' @param filename File basename
-#' @return Character: "flux", "sdxl", "sd1", "sd2", "sd3", or "unknown"
+#' @return Character: "flux2", "flux", "sdxl", "sd1", "sd2", "sd3", or "unknown"
 #' @keywords internal
 .guess_model_type <- function(filename) {
   fn <- tolower(filename)
+  if (grepl("flux[._-]?2|flux2", fn)) return("flux2")
   if (grepl("flux", fn)) return("flux")
   if (grepl("sdxl|_xl", fn)) return("sdxl")
   if (grepl("sd3", fn)) return("sd3")
@@ -76,23 +77,57 @@
   "unknown"
 }
 
-#' Detect model type from a GGUF file's KV metadata (hook / not yet available)
+#' Detect model type from a GGUF file's KV metadata (header-only probe)
 #'
-#' Intended integration point for reading \code{general.architecture} from a
-#' GGUF header WITHOUT loading tensor weights. ggmlR's current
-#' \code{gguf_load()} allocates and reads the full tensor blob (no_alloc =
-#' FALSE), which is unacceptable for a lightweight type probe on multi-GB Flux
-#' models. Until ggmlR exposes a metadata-only load (e.g.
-#' \code{gguf_load(path, meta_only = TRUE)} backed by ggml's no_alloc), this
-#' returns \code{NULL} so the caller falls through to config.json / filename.
+#' Reads \code{general.architecture} (and a few related KV keys) from a GGUF
+#' header WITHOUT loading tensor weights, via
+#' \code{ggmlR::gguf_load(path, meta_only = TRUE)} (no_alloc header read). Cheap
+#' even on multi-GB Flux models.
 #'
-#' Replace the body with a real header read once ggmlR supports it — this is
-#' the single line to change.
+#' Note: stable-diffusion.cpp itself detects the version from tensor
+#' \emph{names/shapes}, not from \code{general.architecture}, so many diffusion
+#' GGUFs (e.g. quantized Flux converters) leave that field empty or set it to a
+#' sub-component name (e.g. \code{"t5"} for a packed text encoder). This probe
+#' is therefore best-effort: it returns a concrete type only on a confident
+#' match and otherwise \code{NULL}, so the caller falls through to
+#' config.json / filename detection.
+#'
 #' @param path Path to a .gguf file
-#' @return Model type string, or \code{NULL} if unavailable
+#' @return Model type string, or \code{NULL} if unavailable / inconclusive
 #' @keywords internal
 .detect_model_type_gguf <- function(path) {
-  # TODO(ggmlR): needs gguf_load(meta_only = TRUE) (no_alloc header read).
+  if (is.null(path) || !nzchar(path)) return(NULL)
+  if (!grepl("\\.gguf$", path, ignore.case = TRUE)) return(NULL)
+  if (!file.exists(path)) return(NULL)
+  if (!requireNamespace("ggmlR", quietly = TRUE)) return(NULL)
+
+  # Require the metadata-only load (no_alloc). Older ggmlR without the
+  # meta_only arg would read the full tensor blob — too expensive for a probe,
+  # so we bail rather than fall back to a heavy load.
+  if (!"meta_only" %in% names(formals(ggmlR::gguf_load))) return(NULL)
+
+  meta <- tryCatch({
+    g <- ggmlR::gguf_load(path, meta_only = TRUE)
+    on.exit(try(ggmlR::gguf_free(g), silent = TRUE), add = TRUE)
+    ggmlR::gguf_metadata(g)
+  }, error = function(e) NULL)
+  if (is.null(meta) || !length(meta)) return(NULL)
+
+  # Collect the architecture-ish KV values into one haystack.
+  keys <- c("general.architecture", "general.name", "general.type",
+            "general.basename")
+  hay <- tolower(paste(unlist(meta[intersect(keys, names(meta))]),
+                       collapse = " "))
+  if (!nzchar(hay)) return(NULL)
+
+  # Confident matches only; order matters (most specific first).
+  if (grepl("flux[._-]?2|flux2", hay))           return("flux2")
+  if (grepl("flux", hay))                        return("flux")
+  if (grepl("sd3|stable[-_ ]?diffusion[-_ ]?3|mmdit", hay)) return("sd3")
+  if (grepl("sdxl|[-_ ]xl\\b", hay))             return("sdxl")
+  if (grepl("\\bsd2\\b|stable[-_ ]?diffusion[-_ ]?2|v2", hay)) return("sd2")
+  if (grepl("\\bsd1\\b|stable[-_ ]?diffusion(?![-_ ]?[23x])|v1", hay,
+            perl = TRUE)) return("sd1")
   NULL
 }
 
@@ -113,6 +148,7 @@
   hay <- tolower(paste(c(j$model_type, j$architectures, j[["_class_name"]]),
                        collapse = " "))
   if (!nzchar(hay)) return(NULL)
+  if (grepl("flux[._-]?2|flux2", hay))    return("flux2")
   if (grepl("flux", hay))                 return("flux")
   if (grepl("sd3|stablediffusion3|mmdit", hay)) return("sd3")
   if (grepl("xl|sdxl", hay))              return("sdxl")
@@ -124,7 +160,7 @@
 #' Resolve model_type, including the "auto" detection hierarchy
 #'
 #' When \code{model_type == "auto"}, tries, in order: GGUF KV metadata
-#' (\code{\link{.detect_model_type_gguf}}, currently a hook), a sibling
+#' (\code{\link{.detect_model_type_gguf}}, header-only probe), a sibling
 #' \code{config.json} (\code{\link{.detect_model_type_config}}), then the
 #' filename heuristic (\code{\link{.guess_model_type}}). If all fail it errors
 #' with a hint to set \code{model_type} explicitly rather than guessing.
@@ -148,7 +184,7 @@
   if (is.null(detected)) {
     stop("Cannot detect model_type from '", basename(path), "'. ",
          "Set it explicitly, e.g. model_type = \"flux\" ",
-         "(one of: sd1, sd2, sdxl, flux, sd3).", call. = FALSE)
+         "(one of: sd1, sd2, sdxl, flux, flux2, sd3).", call. = FALSE)
   }
   detected
 }
@@ -186,7 +222,7 @@
 #' \code{\link{sd_load_model}}.
 #'
 #' @param id Unique model identifier (e.g. "flux-dev", "sd15-base")
-#' @param model_type Model architecture: "sd1", "sd2", "sdxl", "flux", "sd3"
+#' @param model_type Model architecture: "sd1", "sd2", "sdxl", "flux", "flux2", "sd3"
 #' @param paths Named list of file paths. Recognized names:
 #'   \code{diffusion}, \code{model} (alias for diffusion), \code{vae},
 #'   \code{clip_l}, \code{clip_g}, \code{t5xxl}, \code{taesd},
@@ -217,7 +253,7 @@ sd_register_model <- function(id, model_type, paths, defaults = list(),
     stop("Package 'jsonlite' is required. Install with install.packages('jsonlite')",
          call. = FALSE)
   }
-  model_type <- match.arg(model_type, c("sd1", "sd2", "sdxl", "flux", "sd3", "unknown"))
+  model_type <- match.arg(model_type, c("sd1", "sd2", "sdxl", "flux", "flux2", "sd3", "unknown"))
 
   registry <- .read_registry()
   if (!overwrite && id %in% vapply(registry, `[[`, character(1), "id")) {
@@ -291,8 +327,14 @@ sd_list_models <- function() {
 #' loaded, otherwise creates a new \code{\link{sd_ctx}}. Additional
 #' arguments override registry defaults.
 #'
-#' If loading fails due to insufficient VRAM, automatically unloads the
-#' least recently used model and retries.
+#' Before loading, the estimated VRAM need (on-disk weight size times a
+#' headroom factor plus a reserve) is compared against free GPU memory; if it
+#' would not fit, least-recently-used models are unloaded first. If loading
+#' still fails due to insufficient VRAM, the LRU model is unloaded and the load
+#' is retried once. VRAM estimation/eviction is skipped when GPU memory cannot
+#' be queried (e.g. CPU backend). Tunable via environment variables
+#' \code{SD2R_VRAM_HEADROOM} (default 1.2) and \code{SD2R_VRAM_RESERVE_MB}
+#' (default 512).
 #'
 #' @param id Model identifier from registry
 #' @param ... Additional arguments passed to \code{\link{sd_ctx}}, overriding
@@ -360,7 +402,12 @@ sd_load_model <- function(id, ...) {
   user_args <- list(...)
   ctx_args <- modifyList(ctx_args, user_args)
 
-  # Try to load, with LRU eviction on failure
+  # Proactively evict LRU models if the new one likely won't fit in free VRAM.
+  # Runs before sd_ctx() because on Vulkan an OOM can crash the process outright,
+  # so the reactive tryCatch fallback below may never get a chance to run.
+  .mm_ensure_vram(entry)
+
+  # Try to load, with LRU eviction on failure (reactive fallback)
   ctx <- tryCatch(do.call(sd_ctx, ctx_args), error = function(e) {
     # If memory error, try evicting LRU model
     if (length(.mm_env$contexts) > 0L &&
@@ -605,4 +652,75 @@ sd_scan_models <- function(dir, overwrite = FALSE, recursive = FALSE) {
   if (length(.mm_env$last_used) == 0L) return(NULL)
   times <- vapply(.mm_env$last_used, as.numeric, numeric(1))
   names(times)[which.min(times)]
+}
+
+# ---------------------------------------------------------------------------
+# Proactive VRAM management
+# ---------------------------------------------------------------------------
+
+# Headroom multiplier applied to on-disk weight size to estimate peak VRAM,
+# plus an absolute reserve (compute buffers, fragmentation). Tunable via env.
+.mm_vram_headroom <- function() {
+  as.numeric(Sys.getenv("SD2R_VRAM_HEADROOM", "1.2"))
+}
+.mm_vram_reserve_bytes <- function() {
+  as.numeric(Sys.getenv("SD2R_VRAM_RESERVE_MB", "512")) * 1024^2
+}
+
+# Sum on-disk size of a registry entry's weight files. Returns 0 if unknown.
+.mm_model_size_bytes <- function(entry) {
+  paths <- unlist(entry$paths, use.names = FALSE)
+  paths <- paths[!is.na(paths) & nzchar(paths)]
+  if (length(paths) == 0L) return(0)
+  sizes <- file.size(paths)            # NA for missing files
+  sum(sizes[!is.na(sizes)])
+}
+
+# Free VRAM (bytes) on a device, or NULL if it cannot be queried
+# (no Vulkan / CPU backend) — callers must treat NULL as "unknown, skip check".
+.mm_free_vram_bytes <- function(device = NULL) {
+  if (is.null(device)) {
+    device <- as.integer(Sys.getenv("SD_VK_DEVICE", "0"))
+  }
+  tryCatch({
+    mem <- ggmlR::ggml_vulkan_device_memory(device)
+    if (is.null(mem$free)) NULL else as.numeric(mem$free)
+  }, error = function(e) NULL)
+}
+
+# Proactively make room for a model BEFORE loading it: while estimated need
+# exceeds free VRAM, evict the LRU loaded model. Returns invisibly TRUE if it
+# believes the model will fit (or VRAM is unknown), FALSE if room could not be
+# freed. Never throws — loading still proceeds and the reactive OOM fallback in
+# sd_load_model() remains as a second line of defence.
+.mm_ensure_vram <- function(entry, device = NULL, verbose = TRUE) {
+  need <- .mm_model_size_bytes(entry) * .mm_vram_headroom() +
+    .mm_vram_reserve_bytes()
+  if (need <= .mm_vram_reserve_bytes()) {
+    # No usable size estimate (files missing / sizes 0) — can't reason, skip.
+    return(invisible(TRUE))
+  }
+
+  repeat {
+    free <- .mm_free_vram_bytes(device)
+    if (is.null(free)) return(invisible(TRUE))   # unknown VRAM — don't block
+    if (free >= need) return(invisible(TRUE))    # fits
+
+    lru_id <- .find_lru()
+    if (is.null(lru_id)) {
+      # Nothing left to evict and still short on VRAM.
+      if (verbose) {
+        message(sprintf(
+          "Insufficient VRAM: model needs ~%.1f GB, %.1f GB free, nothing to evict.",
+          need / 1e9, free / 1e9))
+      }
+      return(invisible(FALSE))
+    }
+    if (verbose) {
+      message(sprintf(
+        "Freeing VRAM for new model (~%.1f GB needed, %.1f GB free): unloading '%s' (LRU)",
+        need / 1e9, free / 1e9, lru_id))
+    }
+    sd_unload_model(lru_id)
+  }
 }

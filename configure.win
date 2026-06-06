@@ -7,14 +7,37 @@
 # 4. Auto-detect Vulkan support
 # 5. Generate src/Makevars.win from src/Makevars.win.in
 
+# ---- Find R and Rscript (needed early for the download fallback) ----
+
+: ${R_HOME=$(R RHOME 2>/dev/null)}
+if [ -n "$R_HOME" ]; then
+  RSCRIPT="${R_HOME}/bin/Rscript"
+else
+  RSCRIPT="Rscript"
+fi
+
 # ---- Download vocabulary files from GitHub Releases ----
 
-VOCAB_BASE_URL="https://github.com/Zabis13/sd2R/releases/download/assets"
-VOCAB_DIR="src/sd"
-VOCAB_FILES="vocab.hpp vocab_mistral.hpp vocab_qwen.hpp vocab_umt5.hpp"
+VOCAB_BASE_URL="https://github.com/Zabis13/sd2R/releases/download/assets-v2"
+VOCAB_DIR="src/sd/tokenizers/vocab"
+# Core tokenizer vocab/merges embedded at compile time (~64 MB total):
+#   clip_merges.hpp  — CLIP  (SD1/2/SDXL, Flux clip_l/clip_g)
+#   t5.hpp           — T5    (Flux, SD3)
+#   umt5.hpp         — UMT5  (Wan video)
+#   qwen_merges.hpp  — Qwen2 (Qwen-Image)
+VOCAB_FILES="clip_merges.hpp t5.hpp umt5.hpp qwen_merges.hpp"
+# Optional vocabs for additional text encoders are available on the same
+# release but are NOT downloaded by default (would add ~178 MB). To enable
+# them, define SD2R_FULL_VOCAB in src/Makevars.win.in and add the files here:
+#   mistral_vocab.hpp mistral_merges.hpp  — Mistral (Chroma-Radiance, Ernie-Image)
+#   gemma_vocab.hpp   gemma_merges.hpp    — Gemma   (LTX audio/video)
+#   gemma2_vocab.hpp  gemma2_merges.hpp   — Gemma2  (PID)
+#   gpt_oss_vocab.hpp gpt_oss_merges.hpp  — GPT-OSS (Lens)
 DOWNLOAD_FAILED=0
 
-# Find a download tool
+# Find optional external download tools. On Windows these are frequently absent
+# from the Rtools PATH, so R's own download.file() (wininet/libcurl) is used as
+# a fallback that is always available.
 DOWNLOADER=""
 if command -v curl >/dev/null 2>&1; then
   DOWNLOADER="curl"
@@ -22,23 +45,31 @@ elif command -v wget >/dev/null 2>&1; then
   DOWNLOADER="wget"
 fi
 
+# download_one URL DEST -> prints diagnostics, leaves a non-empty DEST on success
+download_one() {
+  _url="$1"; _dest="$2"; _err=""
+  if [ "$DOWNLOADER" = "curl" ]; then
+    _err=$(curl -fSL --retry 3 -o "${_dest}" "${_url}" 2>&1)
+  elif [ "$DOWNLOADER" = "wget" ]; then
+    _err=$(wget --tries=3 -O "${_dest}" "${_url}" 2>&1)
+  fi
+  # If no external tool, or it produced nothing usable, fall back to R.
+  if [ ! -s "${_dest}" ]; then
+    _err=$("$RSCRIPT" -e "tryCatch(utils::download.file('${_url}', '${_dest}', mode='wb', quiet=TRUE), error=function(e) cat(conditionMessage(e)))" 2>&1)
+  fi
+  [ -n "$_err" ] && printf '%s\n' "    ${_err}"
+}
+
 for f in $VOCAB_FILES; do
   if [ -f "${VOCAB_DIR}/${f}" ] && [ -s "${VOCAB_DIR}/${f}" ]; then
     echo "* ${f}: already present, skipping download"
   else
-    if [ -z "$DOWNLOADER" ]; then
-      DOWNLOAD_FAILED=1
-      break
-    fi
     echo "* Downloading ${f}..."
-    if [ "$DOWNLOADER" = "curl" ]; then
-      curl -fSL --retry 3 -o "${VOCAB_DIR}/${f}" "${VOCAB_BASE_URL}/${f}" 2>/dev/null
-    else
-      wget -q --tries=3 -O "${VOCAB_DIR}/${f}" "${VOCAB_BASE_URL}/${f}" 2>/dev/null
-    fi
+    download_one "${VOCAB_BASE_URL}/${f}" "${VOCAB_DIR}/${f}"
     if [ ! -f "${VOCAB_DIR}/${f}" ] || [ ! -s "${VOCAB_DIR}/${f}" ]; then
       DOWNLOAD_FAILED=1
       rm -f "${VOCAB_DIR}/${f}"
+      echo "* ${f}: download FAILED"
     else
       echo "* ${f}: downloaded successfully"
     fi
@@ -50,23 +81,14 @@ if [ "$DOWNLOAD_FAILED" -eq 1 ]; then
   echo "ERROR: Failed to download required vocabulary files."
   echo ""
   echo "These files are required for compilation:"
-  echo "  vocab.hpp, vocab_mistral.hpp, vocab_qwen.hpp, vocab_umt5.hpp"
+  echo "  ${VOCAB_FILES}"
   echo ""
   echo "You can download them manually from:"
   echo "  ${VOCAB_BASE_URL}"
   echo ""
-  echo "Place the files into the src/sd/ directory of the package source,"
+  echo "Place the files into the ${VOCAB_DIR}/ directory of the package source,"
   echo "then run install.packages() again."
   exit 1
-fi
-
-# ---- Find R and Rscript ----
-
-: ${R_HOME=$(R RHOME 2>/dev/null)}
-if [ -n "$R_HOME" ]; then
-  RSCRIPT="${R_HOME}/bin/Rscript"
-else
-  RSCRIPT="Rscript"
 fi
 
 # ---- Resolve ggmlR installed paths ----
@@ -108,11 +130,36 @@ VULKAN_CPPFLAGS=""
 VULKAN_LIBS=""
 
 if [ -n "$VULKAN_SDK" ] && [ -d "$VULKAN_SDK/Lib" ]; then
-  VULKAN_CPPFLAGS="-DSD_USE_VULKAN -I\"${VULKAN_SDK}/Include\""
-  VULKAN_LIBS="-L\"${VULKAN_SDK}/Lib\" -lvulkan-1"
+  # Normalize the SDK path: convert Windows backslashes to forward slashes.
+  # gcc/MinGW accept forward slashes, and this keeps the path safe for use in
+  # the right-hand side of the sed substitutions below. Native backslashes
+  # (e.g. C:\VulkanSDK\1.4.350.0) would be misread by sed as backreferences
+  # (\1, \4, ...) -> "invalid reference \1 on 's' command's RHS".
+  VULKAN_SDK_FWD=$(printf '%s' "$VULKAN_SDK" | tr '\\' '/')
+  VULKAN_CPPFLAGS="-DSD_USE_VULKAN -I\"${VULKAN_SDK_FWD}/Include\""
+  VULKAN_LIBS="-L\"${VULKAN_SDK_FWD}/Lib\" -lvulkan-1"
   echo "* Vulkan: enabled (SDK: ${VULKAN_SDK})"
 else
   echo "* Vulkan: not found (building without GPU support)"
+fi
+
+# ---- Detect ggml meta backend support in libggml.a ----
+#
+# Optional multi-GPU "second path" (sd_ctx(meta_backend = TRUE)). Only compile
+# the meta API calls when ggml_backend_meta_device is defined in libggml.a,
+# else linking fails on older ggmlR. Minimum supported ggmlR: 0.7.8 (no
+# compile-time version macro exists, so symbol presence is the gate).
+
+META_CPPFLAGS=""
+if [ -f "${GGMLR_LIB}/libggml.a" ]; then
+  if nm --defined-only "${GGMLR_LIB}/libggml.a" 2>/dev/null | grep -q "ggml_backend_meta_device"; then
+    META_CPPFLAGS="-DSD2R_HAVE_META_BACKEND=1"
+    echo "* Meta backend: enabled (ggml_backend_meta_device found in libggml.a)"
+  else
+    echo "* Meta backend: disabled (ggml_backend_meta_device not defined in libggml.a; need ggmlR >= 0.7.8)"
+  fi
+else
+  echo "* Meta backend: disabled (libggml.a not found)"
 fi
 
 # ---- Generate src/Makevars.win from src/Makevars.win.in ----
@@ -124,6 +171,7 @@ sed \
   -e "s|@GGMLR_INCLUDE@|${GGMLR_INCLUDE}|g" \
   -e "s|@VULKAN_CPPFLAGS@|${VULKAN_CPPFLAGS}|g" \
   -e "s|@VULKAN_LIBS@|${VULKAN_LIBS}|g" \
+  -e "s|@META_CPPFLAGS@|${META_CPPFLAGS}|g" \
   -e "s|@OPENMP_CXXFLAGS@|${OPENMP_CXXFLAGS}|g" \
   src/Makevars.win.in > src/Makevars.win
 

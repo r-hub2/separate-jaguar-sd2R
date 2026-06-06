@@ -6,7 +6,7 @@
 
 ## Overview
 
-sd2R exposes a high-level R interface for text-to-image and image-to-image generation, while all heavy computation (tokenization, encoders, denoiser, sampler, VAE, model loading) is implemented in C++. Supports SD 1.x, SD 2.x, SDXL, and Flux model families. Targets local inference on Linux with Vulkan-enabled AMD GPUs (with automatic CPU fallback via ggml), without relying on external Python or web APIs.
+sd2R exposes a high-level R interface for text-to-image and image-to-image generation, while all heavy computation (tokenization, encoders, denoiser, sampler, VAE, model loading) is implemented in C++. Supports SD 1.x, SD 2.x, SDXL, Flux, and FLUX.2 (Klein) model families. Targets local inference on Linux with Vulkan-enabled AMD GPUs (with automatic CPU fallback via ggml), without relying on external Python or web APIs.
 
 ## Architecture
 
@@ -27,9 +27,11 @@ R  →  sd2R  →  ggmlR  →  ggml  →  Vulkan  →  GPU
 - **VRAM-aware auto-routing**: queries free GPU memory at runtime and routes to direct generation (fits in VRAM), highres fix (txt2img + upscale + tiled img2img, preferred for coherent large images), or tiled sampling (MultiDiffusion fallback). VAE tiling is also VRAM-aware — enabled automatically only when free memory is insufficient for the given resolution. Set `vram_gb` in `sd_ctx()` to override auto-detection.
 - **Multi-GPU data parallelism**: `sd_generate_multi_gpu()` distributes prompts across Vulkan GPUs via `callr`, one process per GPU, with progress reporting.
 - **Multi-GPU model parallelism**: `device_layout` parameter in `sd_ctx()` distributes sub-models across multiple Vulkan GPUs within a single process. Presets: `"mono"` (all on one GPU), `"split_encoders"` (CLIP/T5 on GPU 1, diffusion + VAE on GPU 0), `"split_vae"` (CLIP/T5 + VAE on GPU 1, diffusion on GPU 0), `"encoders_cpu"` (text encoders on CPU). Manual override via `diffusion_gpu`, `clip_gpu`, `vae_gpu`.
+- **Multi-GPU tensor split**: `meta_backend = TRUE` in `sd_ctx()` shards a single diffusion model across all available GPUs via the ggml meta backend (for models too large for one GPU). Requires ggmlR >= 0.7.8; falls back to the normal single-backend path otherwise.
 - **Profiling**: built-in per-stage timing via `sd_profile_start()` / `sd_profile_stop()` / `sd_profile_summary()`. Tracks model loading, text encoding (with CLIP/T5 breakdown), sampling, and VAE decode/encode stages.
-- **Text-to-image** generation supporting Stable Diffusion 1.x, 2.x, SDXL, and Flux models with typical generations taking a few seconds on Vulkan-enabled GPUs.
+- **Text-to-image** generation supporting Stable Diffusion 1.x, 2.x, SDXL, Flux, and FLUX.2 (Klein) models with typical generations taking a few seconds on Vulkan-enabled GPUs.
 - **Image-to-image** workflows with noise strength control and reuse of the same denoising pipeline as text-to-image. Requires `vae_decode_only = FALSE` in context.
+- **Inpainting**: the `mask` argument of `sd_img2img()` regenerates only the masked region while preserving the rest. Accepts a PNG path, a numeric matrix, or an SD image (white = generate, black = keep); `sd_load_mask()` loads a mask file. Works on plain SD/SDXL/FLUX 1/2 weights — no dedicated inpaint model required.
 - **Optional upscaling** using a dedicated upscaler context managed entirely in C++ and exposed to R through external pointers.
 - **VRAM-aware Tiled VAE** for high-resolution images (2K, 4K+) with bounded VRAM usage. `vae_mode = "auto"` (default) queries free GPU memory before VAE decode and enables tiling only when estimated peak usage exceeds available VRAM (with a 50 MB safety reserve). Falls back to a pixel-area threshold (`vae_auto_threshold`) when Vulkan memory query is unavailable (CPU backend, no GPU). Supports per-axis relative tile sizing (`vae_tile_rel_x`, `vae_tile_rel_y`) for non-square aspect ratios.
 - **Tiled diffusion sampling** (MultiDiffusion): at each denoising step the latent is split into overlapping tiles, each denoised independently, and merged with Gaussian weighting. VRAM usage scales with tile size, not output resolution.
@@ -50,6 +52,7 @@ sd_app(model_dir = "/path/to/models")
 Features:
 - Auto-detects model architecture (Flux, SD3, SDXL, SD1/2) and assigns component roles (diffusion, VAE, CLIP, T5)
 - Non-blocking generation with live progress bar and ETA
+- Shares `sd_generate()`'s auto-routing: guidance-distilled CFG (Flux/FLUX.2), VRAM-aware VAE tiling, and multi-step highres-fix all run through the async engine
 - Prevents incompatible model combinations
 
 ## Pipeline Example
@@ -128,12 +131,24 @@ CLIP-L + T5-XXL text encoders, VAE. `sample_steps = 10`.
 
 | Test | AMD RX 9070 (16 GB) | Tesla P100 (16 GB) | 2x Tesla T4 (16 GB) |
 |---|---|---|---|
-| 1. 768x768 direct | 13.94 s | 94.0 s | 133.1 s |
-| 2. 1024x1024 tiled VAE | 25.32 s | 151.4 s | 243.6 s |
-| 3. 2048x1024 highres fix | 52.53 s | 312.5 s | 492.2 s |
-| 4. img2img 768x768 direct | 8.73 s | 51.0 s | 73.5 s |
-| 5. 1024x1024 direct | 25.40 s | 152.2 s | 243.3 s |
-| 6. Multi-GPU 4 prompts | -- | -- | 284.9 s (4 img) |
+| 1. 768x768 direct | 13.72 s | 94.0 s | 62.0 s |
+| 2. 1024x1024 tiled VAE | 24.84 s | 151.4 s | 105.6 s |
+| 3. 2048x1024 highres fix | 42.70 s | 312.5 s | 222.0 s |
+| 4. img2img 768x768 direct | 8.16 s | 51.0 s | 32.8 s |
+| 5. 1024x1024 direct | 24.90 s | 152.2 s | 112.1 s |
+| 6. Multi-GPU 4 prompts | -- | -- | 141.7 s (4 img) |
+
+### FLUX.2 Klein 4B — 4 steps
+
+Qwen3 LLM text encoder + FLUX.2 VAE. `sample_steps = 4`.
+
+| Test | AMD RX 9070 (16 GB) |
+|---|---|
+| 1. 768x768 direct | 13.58 s |
+| 2. 1024x1024 tiled VAE | 32.51 s |
+| 3. 2048x1024 highres fix | 45.01 s |
+| 4. img2img 768x768 direct | 8.08 s |
+| 5. 1024x1024 direct | 33.31 s |
 
 ### Model size comparison
 
