@@ -30,7 +30,7 @@ namespace sd {
         // them to R-safe wrappers (r_ggml_fprintf/r_ggml_fflush). A std:: prefix
         // would yield std::r_ggml_fflush, which does not exist.
         fprintf(stderr, "sd::Tensor error: %s\n", message.c_str());
-        r_ggml_fflush(NULL);
+        fflush(NULL);
         throw std::invalid_argument(message);
     }
 

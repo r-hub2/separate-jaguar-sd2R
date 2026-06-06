@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <codecvt>
 #include <cstdarg>
 #include <exception>
 #include <fstream>
@@ -351,13 +350,64 @@ bool sd_preview_denoised             = true;
 bool sd_preview_noisy                = false;
 
 std::u32string utf8_to_utf32(const std::string& utf8_str) {
-    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
-    return converter.from_bytes(utf8_str);
+    // Manual UTF-8 -> UTF-32 decode (std::wstring_convert is deprecated in C++17).
+    std::u32string utf32_str;
+    size_t i      = 0;
+    const size_t n = utf8_str.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(utf8_str[i]);
+        char32_t cp;
+        int extra;
+        if (c < 0x80) {
+            cp    = c;
+            extra = 0;
+        } else if ((c >> 5) == 0x6) {
+            cp    = c & 0x1F;
+            extra = 1;
+        } else if ((c >> 4) == 0xE) {
+            cp    = c & 0x0F;
+            extra = 2;
+        } else if ((c >> 3) == 0x1E) {
+            cp    = c & 0x07;
+            extra = 3;
+        } else {
+            // Invalid lead byte; skip it.
+            ++i;
+            continue;
+        }
+        if (i + extra >= n) {
+            break;  // truncated sequence
+        }
+        for (int k = 1; k <= extra; ++k) {
+            cp = (cp << 6) | (static_cast<unsigned char>(utf8_str[i + k]) & 0x3F);
+        }
+        utf32_str.push_back(cp);
+        i += extra + 1;
+    }
+    return utf32_str;
 }
 
 std::string utf32_to_utf8(const std::u32string& utf32_str) {
-    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
-    return converter.to_bytes(utf32_str);
+    // Manual UTF-32 -> UTF-8 encode (std::wstring_convert is deprecated in C++17).
+    std::string utf8_str;
+    for (char32_t cp : utf32_str) {
+        if (cp < 0x80) {
+            utf8_str.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            utf8_str.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            utf8_str.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            utf8_str.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            utf8_str.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            utf8_str.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            utf8_str.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            utf8_str.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            utf8_str.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            utf8_str.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return utf8_str;
 }
 
 std::u32string unicode_value_to_utf32(int unicode_value) {

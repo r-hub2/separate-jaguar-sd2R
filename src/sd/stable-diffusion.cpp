@@ -589,7 +589,6 @@ public:
                                                                      version,
                                                                      sd_ctx_params->chroma_use_dit_mask);
             } else if (sd_version_is_flux2(version)) {
-                bool is_chroma   = false;
                 cond_stage_model = std::make_shared<LLMEmbedder>(backend_for(SDBackendModule::TE),
                                                                  params_backend_for(SDBackendModule::TE),
                                                                  tensor_storage_map,
@@ -2138,7 +2137,7 @@ public:
 
                 sd::Tensor<float> cached_output;
                 if (step_cache.before_condition(&condition, noised_input, &cached_output)) {
-                    return std::move(cached_output);
+                    return cached_output;
                 }
 
                 auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
@@ -5396,7 +5395,7 @@ static sd::Tensor<float> sd_tensor_to_tensor(const sd_tensor* t) {
     }
     std::vector<int64_t> shape(t->ne, t->ne + n_dims);
     sd::Tensor<float> out(shape);
-    memcpy(out.data(), t->data, std::min(t->nbytes, out.numel() * sizeof(float)));
+    memcpy(out.data(), t->data, std::min(static_cast<size_t>(t->nbytes), static_cast<size_t>(out.numel()) * sizeof(float)));
     return out;
 }
 

@@ -298,8 +298,6 @@ const float sd_latent_rgb_proj[4][3] = {
 float sd_latent_rgb_bias[3] = {-0.017478f, -0.055834f, -0.105825f};
 
 void preview_latent_video(uint8_t* buffer, ggml_tensor* latents, const float (*latent_rgb_proj)[3], const float latent_rgb_bias[3], int patch_size) {
-    size_t buffer_head = 0;
-
     uint32_t latent_width  = static_cast<uint32_t>(latents->ne[0]);
     uint32_t latent_height = static_cast<uint32_t>(latents->ne[1]);
     uint32_t dim           = static_cast<uint32_t>(latents->ne[ggml_n_dims(latents) - 1]);

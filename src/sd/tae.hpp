@@ -78,7 +78,7 @@ public:
 class TinyEncoder : public UnaryBlock {
     int in_channels = 3;
     int channels    = 64;
-    int z_channels  = 4;
+    [[maybe_unused]] int z_channels = 4;
     int num_blocks  = 3;
 
 public:
@@ -121,7 +121,7 @@ public:
 };
 
 class TinyDecoder : public UnaryBlock {
-    int z_channels   = 4;
+    [[maybe_unused]] int z_channels = 4;
     int channels     = 64;
     int out_channels = 3;
     int num_blocks   = 3;
@@ -360,7 +360,7 @@ ggml_tensor* unpatchify(ggml_context* ctx,
 class TinyVideoEncoder : public UnaryBlock {
     int in_channels = 3;
     int hidden      = 64;
-    int z_channels  = 4;
+    [[maybe_unused]] int z_channels = 4;
     int num_blocks  = 3;
     int num_layers  = 3;
     int patch_size  = 1;
@@ -420,7 +420,7 @@ public:
 };
 
 class TinyVideoDecoder : public UnaryBlock {
-    int z_channels               = 4;
+    [[maybe_unused]] int z_channels = 4;
     int out_channels             = 3;
     int num_blocks               = 3;
     static const int num_layers  = 3;

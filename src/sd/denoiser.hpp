@@ -1724,7 +1724,6 @@ static sd::Tensor<float> sample_tcd(denoise_cb_t model,
         sd::Tensor<float> d        = (x - denoised) / sigma;
 
         float alpha_prod_t      = 1.0f / (sigma * sigma + 1.0f);
-        float beta_prod_t       = 1.0f - alpha_prod_t;
         float alpha_prod_t_prev = 1.0f / (sigma_to * sigma_to + 1.0f);
         float alpha_prod_s      = static_cast<float>(alphas_cumprod[timestep_s]);
         float beta_prod_s       = 1.0f - alpha_prod_s;
@@ -1847,7 +1846,7 @@ static sd::Tensor<float> sample_gradient_estimation(denoise_cb_t model,
 }
 
 // k diffusion reverse ODE: dx = (x - D(x;\sigma)) / \sigma dt; \sigma(t) = t
-static sd::Tensor<float> sample_k_diffusion(sample_method_t method,
+inline sd::Tensor<float> sample_k_diffusion(sample_method_t method,
                                             denoise_cb_t model,
                                             sd::Tensor<float> x,
                                             std::vector<float> sigmas,
