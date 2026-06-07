@@ -192,7 +192,9 @@ __STATIC_INLINE__ float sd_image_get_f32(sd_image_t image, int64_t iw, int64_t i
 }
 
 __STATIC_INLINE__ void print_ggml_tensor(ggml_tensor* tensor, bool shape_only = false, const char* mark = "") {
-    r_ggml_printf("%s (%s): shape(%zu, %zu, %zu, %zu)\n", mark, ggml_type_name(tensor->type), tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
+    r_ggml_printf("%s (%s): shape(%lld, %lld, %lld, %lld)\n", mark, ggml_type_name(tensor->type),
+                  static_cast<long long>(tensor->ne[0]), static_cast<long long>(tensor->ne[1]),
+                  static_cast<long long>(tensor->ne[2]), static_cast<long long>(tensor->ne[3]));
     r_ggml_fflush(NULL);
     if (shape_only) {
         return;
@@ -3356,7 +3358,7 @@ public:
         force_prec_f32 = force_prec_f32_;
     }
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
@@ -3400,7 +3402,7 @@ public:
     }
 
     ggml_tensor* forward(GGMLRunnerContext* ctx,
-                         ggml_tensor* input_ids) {
+                         ggml_tensor* input_ids) override {
         // input_ids: [N, n_token]
         auto weight = params["weight"];
 
@@ -3460,11 +3462,11 @@ public:
         scale = scale_value;
     }
 
-    std::string get_desc() {
+    std::string get_desc() override {
         return "Conv2d";
     }
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
@@ -3547,11 +3549,11 @@ public:
         scale = scale_value;
     }
 
-    std::string get_desc() {
+    std::string get_desc() override {
         return "Conv2d_grouped";
     }
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
@@ -3703,7 +3705,7 @@ public:
           bias(bias),
           force_prec_f32(force_prec_f32) {}
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (ctx->weight_adapter) {
@@ -3756,7 +3758,7 @@ public:
           elementwise_affine(elementwise_affine),
           bias(bias) {}
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = nullptr;
         ggml_tensor* b = nullptr;
 
@@ -3843,7 +3845,7 @@ public:
         : hidden_size(hidden_size),
           eps(eps) {}
 
-    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
         ggml_tensor* w = params["weight"];
         if (ctx->weight_adapter) {
             w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, w, prefix + "weight");

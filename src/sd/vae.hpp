@@ -226,7 +226,7 @@ struct FakeVAE : public VAE {
     FakeVAE(SDVersion version, ggml_backend_t backend, ggml_backend_t params_backend)
         : VAE(version, backend, params_backend) {}
 
-    int get_encoder_output_channels(int input_channels) {
+    int get_encoder_output_channels(int input_channels) override {
         return input_channels;
     }
 

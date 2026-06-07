@@ -1238,7 +1238,7 @@ struct FluxCLIPEmbedder : public Conditioner {
         }
     }
 
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) {
+    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         if (clip_l) {
             clip_l->set_weight_adapter(adapter);
         }

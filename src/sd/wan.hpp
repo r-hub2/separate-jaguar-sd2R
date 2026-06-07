@@ -1197,7 +1197,7 @@ namespace WAN {
             return ((latents - mean_tensor) * scale_factor) / std_tensor;
         }
 
-        int get_encoder_output_channels(int input_channels) {
+        int get_encoder_output_channels(int input_channels) override {
             return static_cast<int>(ae.z_dim);
         }
 

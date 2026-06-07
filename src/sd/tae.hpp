@@ -639,7 +639,7 @@ struct TinyImageAutoEncoder : public VAE {
         return "taesd";
     }
 
-    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) {
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) override {
         taesd.get_param_tensors(tensors, prefix);
     }
 
@@ -656,7 +656,7 @@ struct TinyImageAutoEncoder : public VAE {
         return latents;
     }
 
-    int get_encoder_output_channels(int input_channels) {
+    int get_encoder_output_channels(int input_channels) override {
         return taesd.z_channels;
     }
 
@@ -708,7 +708,7 @@ struct TinyVideoAutoEncoder : public VAE {
         return "taehv";
     }
 
-    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) {
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) override {
         taehv.get_param_tensors(tensors, prefix);
     }
 
@@ -725,7 +725,7 @@ struct TinyVideoAutoEncoder : public VAE {
         return latents;
     }
 
-    int get_encoder_output_channels(int input_channels) {
+    int get_encoder_output_channels(int input_channels) override {
         return taehv.z_channels;
     }
 
