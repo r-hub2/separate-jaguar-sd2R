@@ -76,13 +76,14 @@ URL: https://github.com/Zabis13/sd2R
 BugReports: https://github.com/Zabis13/sd2R/issues
 Depends: R (>= 4.1.0)
 Encoding: UTF-8
-Imports: Rcpp (>= 1.0.0), ggmlR (>= 0.5.0), shiny, base64enc, jsonlite
+Imports: Rcpp (>= 1.0.0), ggmlR (>= 0.5.0), shiny, base64enc, jsonlite,
+        later, png
 LinkingTo: Rcpp, ggmlR
-Suggests: testthat (>= 3.0.0), callr, png, plumber, drogonR, withr
+Suggests: testthat (>= 3.0.0), callr, plumber, drogonR, withr
 RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-06-07 04:36:48 UTC; yuri
+Packaged: 2026-06-09 17:46:00 UTC; yuri
 Author: Yuri Baramykov [aut, cre] (<https://orcid.org/0009-0000-7627-4217>),
   Georgi Gerganov [ctb, cph] (Author of the GGML library),
   leejet [ctb, cph] (Author of stable-diffusion.cpp),
