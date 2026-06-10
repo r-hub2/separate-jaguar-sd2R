@@ -90,7 +90,8 @@ test_that("auto_assign_roles detects SDXL architecture", {
 
   expect_equal(roles$arch, "sdxl")
   expect_equal(roles$model, "sdxl_base_1.0.safetensors")
-  expect_match(roles$vae, "vae")
+  # SDXL bundles its VAE inside the checkpoint, so no external VAE is assigned.
+  expect_equal(roles$vae, "")
 })
 
 test_that("auto_assign_roles returns sd1 for empty dir", {
