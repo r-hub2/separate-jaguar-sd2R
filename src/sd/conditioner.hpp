@@ -1829,10 +1829,12 @@ struct LLMEmbedder : public Conditioner {
                 parsed_attention.emplace_back(text.substr(0, attn_range.first), 1.f);
             }
             if (attn_range.second - attn_range.first > 0) {
+                LOG_INFO("SD2R_DBG tokenize: BEFORE parse_prompt_attention");
                 auto new_parsed_attention = parse_prompt_attention(text.substr(attn_range.first, attn_range.second - attn_range.first));
                 if (spell_quotes) {
                     new_parsed_attention = split_quotation_attention(new_parsed_attention);
                 }
+                LOG_INFO("SD2R_DBG tokenize: AFTER parse_prompt_attention (%zu chunks)", new_parsed_attention.size());
                 parsed_attention.insert(parsed_attention.end(),
                                         new_parsed_attention.begin(),
                                         new_parsed_attention.end());
@@ -1856,16 +1858,21 @@ struct LLMEmbedder : public Conditioner {
 
         std::vector<int> tokens;
         std::vector<float> weights;
+        LOG_INFO("SD2R_DBG tokenize: %zu attention chunk(s), BEFORE encode loop", parsed_attention.size());
         for (const auto& item : parsed_attention) {
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
+            LOG_INFO("SD2R_DBG tokenize: BEFORE encode chunk len=%zu", curr_text.size());
             std::vector<int> curr_tokens = tokenizer->encode(curr_text, nullptr);
+            LOG_INFO("SD2R_DBG tokenize: AFTER encode chunk -> %zu tokens", curr_tokens.size());
             tokens.insert(tokens.end(), curr_tokens.begin(), curr_tokens.end());
             weights.insert(weights.end(), curr_tokens.size(), curr_weight);
         }
 
         std::vector<float> mask;
+        LOG_INFO("SD2R_DBG tokenize: BEFORE pad_tokens (%zu tokens)", tokens.size());
         tokenizer->pad_tokens(tokens, &weights, &mask, min_length, max_length);
+        LOG_INFO("SD2R_DBG tokenize: AFTER pad_tokens (%zu tokens)", tokens.size());
 
         // for (int i = 0; i < tokens.size(); i++) {
         //     std::cout << tokens[i] << ":" << weights[i] << ", " << i << std::endl;
@@ -1885,7 +1892,9 @@ struct LLMEmbedder : public Conditioner {
                                     int prompt_template_encode_start_idx,
                                     bool spell_quotes = false,
                                     int max_length    = 100000000) {
+        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: BEFORE tokenize");
         auto tokens_weights_mask = tokenize(prompt, prompt_attn_range, min_length, max_length, spell_quotes);
+        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: AFTER tokenize (%zu tokens)", std::get<0>(tokens_weights_mask).size());
         auto& tokens             = std::get<0>(tokens_weights_mask);
         auto& weights            = std::get<1>(tokens_weights_mask);
         auto& mask               = std::get<2>(tokens_weights_mask);
@@ -1909,11 +1918,13 @@ struct LLMEmbedder : public Conditioner {
             }
         }
 
+        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: BEFORE llm->compute (out_layers=%zu)", out_layers.size());
         auto hidden_states = llm->compute(n_threads,
                                           input_ids,
                                           attention_mask,
                                           image_embeds,
                                           out_layers);
+        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: AFTER llm->compute");
         GGML_ASSERT(!hidden_states.empty());
         hidden_states = apply_token_weights(std::move(hidden_states), weights);
         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);

@@ -1814,7 +1814,12 @@ protected:
 
     void alloc_compute_ctx() {
         ggml_init_params params;
-        params.mem_size   = static_cast<size_t>(ggml_tensor_overhead() * MAX_GRAPH_SIZE + ggml_graph_overhead());
+        // Graphs may be created with up to MAX_GRAPH_SIZE nodes (e.g. flux uses
+        // FLUX_GRAPH_SIZE=10240 > GGML_DEFAULT_GRAPH_SIZE=8192). ggml_graph_overhead()
+        // only reserves space for a default-sized graph, so a larger graph overflowed
+        // the context pool -> ggml_new_graph_custom corrupted the heap and the process
+        // died silently on Windows/MinGW. Reserve overhead for the largest graph.
+        params.mem_size   = static_cast<size_t>(ggml_tensor_overhead() * MAX_GRAPH_SIZE + ggml_graph_overhead_custom(MAX_GRAPH_SIZE, false));
         params.mem_buffer = nullptr;
         params.no_alloc   = true;
 
@@ -2608,6 +2613,7 @@ protected:
         int64_t t_execute_begin              = ggml_time_ms();
         const bool use_partial_param_offload = !runtime_param_tensors.empty();
         int64_t t_offload_begin              = ggml_time_ms();
+        LOG_INFO("SD2R_DBG compute(%s): BEFORE offload params (nodes=%d)", get_desc().c_str(), ggml_graph_n_nodes(gf));
         if (use_partial_param_offload) {
             if (!offload_partial_params(runtime_param_tensors)) {
                 LOG_ERROR("%s offload partial params to runtime backend failed", get_desc().c_str());
@@ -2620,6 +2626,7 @@ protected:
             }
         }
         int64_t t_offload_end = ggml_time_ms();
+        LOG_INFO("SD2R_DBG compute(%s): AFTER offload, BEFORE alloc_compute_buffer", get_desc().c_str());
 
         int64_t t_alloc_begin = ggml_time_ms();
         if (!alloc_compute_buffer(gf)) {
@@ -2629,6 +2636,7 @@ protected:
             }
             return std::nullopt;
         }
+        LOG_INFO("SD2R_DBG compute(%s): AFTER alloc_compute_buffer, BEFORE gallocr_alloc_graph", get_desc().c_str());
 
         if (!ggml_gallocr_alloc_graph(compute_allocr, gf)) {
             LOG_ERROR("%s alloc compute graph failed", get_desc().c_str());
@@ -2640,6 +2648,7 @@ protected:
             return std::nullopt;
         }
         int64_t t_alloc_end = ggml_time_ms();
+        LOG_INFO("SD2R_DBG compute(%s): buffers allocated, copying input to backend", get_desc().c_str());
 
         int64_t t_copy_begin = ggml_time_ms();
         copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
@@ -2648,9 +2657,11 @@ protected:
             sd_backend_cpu_set_n_threads(runtime_backend, n_threads);
         }
 
+        LOG_INFO("SD2R_DBG compute(%s): calling ggml_backend_graph_compute", get_desc().c_str());
         int64_t t_compute_begin = ggml_time_ms();
         ggml_status status      = ggml_backend_graph_compute(runtime_backend, gf);
         int64_t t_compute_end   = ggml_time_ms();
+        LOG_INFO("SD2R_DBG compute(%s): ggml_backend_graph_compute returned status=%d", get_desc().c_str(), (int)status);
         if (status != GGML_STATUS_SUCCESS) {
             LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
             if (free_compute_buffer_immediately) {

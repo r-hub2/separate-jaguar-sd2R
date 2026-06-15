@@ -31,7 +31,11 @@ local({
     if (depth == 0) { end_presets <- i; break }
   }
 
-  code <- c(lines[start_presets:end_presets], "", lines[start_fn:end_fn])
+  # auto_assign_roles uses %||%, which lives near the top of app.R (outside the
+  # extracted ranges). Define it here so the extracted function is self-contained.
+  helper <- "`%||%` <- function(a, b) if (is.null(a)) b else a"
+
+  code <- c(helper, "", lines[start_presets:end_presets], "", lines[start_fn:end_fn])
   eval(parse(text = code), envir = .GlobalEnv)
 })
 

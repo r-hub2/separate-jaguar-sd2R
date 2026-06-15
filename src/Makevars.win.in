@@ -10,17 +10,31 @@ VULKAN_CPPFLAGS = @VULKAN_CPPFLAGS@
 VULKAN_LIBS = @VULKAN_LIBS@
 META_CPPFLAGS = @META_CPPFLAGS@
 OPENMP_CXXFLAGS = @OPENMP_CXXFLAGS@
+# -DGGML_USE_OPENMP when OpenMP is available (resolved by configure.win).
+# Required so the ggml-cpu graph executor's OpenMP regions are compiled in;
+# without it the CPU path is single-threaded even with -fopenmp.
+OPENMP_CPPFLAGS = @OPENMP_CPPFLAGS@
 
 PKG_CPPFLAGS = -Isd -Isd/thirdparty -Isd/tokenizers -Isd/tokenizers/vocab \
   -DGGML_USE_CPU -D_GNU_SOURCE \
   -DGGML_MAX_NAME=128 \
   -DGGML_R_PACKAGE \
+  $(OPENMP_CPPFLAGS) \
   $(VULKAN_CPPFLAGS) \
   $(META_CPPFLAGS) \
   $(PKG_CPPFLAGS_WIN)
 
 PKG_CXXFLAGS = $(OPENMP_CXXFLAGS)
-PKG_LIBS = -L$(GGMLR_LIB) -lggml $(OPENMP_CXXFLAGS) $(VULKAN_LIBS) -lpthread -lm
+# -L is double-quoted as a belt-and-suspenders guard: configure.win already
+# converts GGMLR_LIB to a short 8.3 path (no spaces), but if Windows 8.3 name
+# generation is disabled the path may still contain spaces. The quotes keep ld
+# from splitting "C:/Program Files/..." into two arguments in that case.
+# -static-libstdc++ -static-libgcc: must match ggmlR's Makevars.win.in. sd2R links
+# libggml.a (-lggml) statically; if sd2R and that code link a DIFFERENT libstdc++
+# than each other (or than the Vulkan ICD), operator new/delete cross a heap
+# boundary and crash ~50/50 during Flux2 load (ggml_backend_buffer_init). Static
+# C++ runtime gives the final sd2R.dll one libstdc++ for all linked-in objects.
+PKG_LIBS = -L"$(GGMLR_LIB)" -lggml $(OPENMP_CXXFLAGS) $(VULKAN_LIBS) -lpthread -lm -static-libstdc++ -static-libgcc
 
 SD_OBJECTS = \
   sd/stable-diffusion.o \
@@ -58,7 +72,10 @@ OBJECTS = $(R_INTERFACE_OBJECTS) $(SD_OBJECTS)
 
 # Force-include r_ggml_compat.h only for sd/ objects (not Rcpp files).
 # Rcpp files use R API directly and don't need stdio redirections.
-SD_COMPAT_FLAGS = -include $(GGMLR_INCLUDE)/r_ggml_compat.h
+# Use bare filename (not full path) so MinGW's quoting of paths with spaces
+# (e.g. C:/Program Files/...) doesn't break -include. The header is found via
+# the -I path that R adds automatically from LinkingTo: ggmlR.
+SD_COMPAT_FLAGS = -include r_ggml_compat.h
 
 sd/stable-diffusion.o: PKG_CPPFLAGS += $(SD_COMPAT_FLAGS)
 sd/model.o: PKG_CPPFLAGS += $(SD_COMPAT_FLAGS)

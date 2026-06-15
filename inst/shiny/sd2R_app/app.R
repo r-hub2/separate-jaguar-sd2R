@@ -1050,6 +1050,19 @@ server <- function(input, output, session) {
     }
     out <- c(out, fa)
 
+    # Text-encoder backend (CPU vs GPU). sd.cpp logs the encoder compute buffer
+    # as "<name> compute buffer size: N MB(RAM)" or "...MB(VRAM)" — RAM means the
+    # encoder ran on CPU (keep_clip_on_cpu, or the platform default), VRAM means
+    # it ran on the GPU. This is THE signal that separates a healthy run from the
+    # Windows VRAM-spill case, so surface it explicitly.
+    te_line <- grep("(qwen|qwen3|mistral|t5|clip|llm).*compute buffer size:.*MB\\((RAM|VRAM)\\)",
+                    lines, value = TRUE, ignore.case = TRUE)
+    if (length(te_line)) {
+      where <- sub(".*MB\\((RAM|VRAM)\\).*", "\\1", te_line[1])
+      out <- c(out, sprintf("text encoder backend: %s",
+                            if (identical(where, "RAM")) "CPU (RAM)" else "GPU (VRAM)"))
+    }
+
     # All "<label> completed/decoded, taking X.XXs" stage timings, in order.
     # Strip the leading "file.cpp:NNN - " source location sd.cpp prepends.
     pat  <- "(.+?)(?: completed| decoded)?, taking ([0-9.]+)s"
@@ -1078,6 +1091,37 @@ server <- function(input, output, session) {
   # speed (a missing coopmat1_fa_support means flash-attn silently falls back).
   collect_vulkan_caps <- function() {
     capture.output({
+      # --- CPU / build capabilities ----------------------------------------
+      # These come from the linked libggml.a (ggmlR), NOT from sd2R's own
+      # compile flags — the CPU math kernels (incl. the text encoder when it
+      # runs on CPU) live there. A Windows build of ggmlR missing AVX2/FMA or
+      # OPENMP makes CPU text_encode collapse to scalar/single-thread and can
+      # take minutes (observed: 584s on a strong CPU). This block is the first
+      # thing to check when text_encode is slow with the encoder on CPU.
+      cat("=== CPU / Build Capabilities (from libggml.a) ===\n\n")
+      si <- tryCatch(sd2R::sd_system_info(), error = function(e) NULL)
+      if (!is.null(si)) {
+        cat("sd2R version :", si$sd2R_version, "\n")
+        cat("sd.cpp build :", si$sd_cpp_version, "\n")
+        cat("CPU cores    :", si$num_cores, "\n")
+        cat("ggml string  :", trimws(si$system_info), "\n")
+      }
+      cf <- tryCatch(ggmlR::ggml_cpu_features(), error = function(e) NULL)
+      if (!is.null(cf)) {
+        cat("ggml version :", tryCatch(ggmlR::ggml_version(),
+                                       error = function(e) "?"), "\n")
+        flag <- function(x) if (isTRUE(cf[[x]])) "YES" else "no"
+        # The four that actually move the needle for CPU text_encode speed.
+        cat("\n  --- key CPU flags ---\n")
+        cat(sprintf("  OPENMP : %s   (multi-thread matmul; OFF => single-thread)\n",
+                    if (grepl("OPENMP = 1", si$system_info %||% "")) "YES" else "no"))
+        cat(sprintf("  AVX2   : %s   (vectorized matmul; OFF => scalar, ~slow)\n", flag("avx2")))
+        cat(sprintf("  FMA    : %s\n", flag("fma")))
+        cat(sprintf("  F16C   : %s   (fast f16<->f32 for quantized weights)\n", flag("f16c")))
+        cat(sprintf("  AVX512 : %s\n", flag("avx512")))
+        cat("\n")
+      }
+
       cat("=== Vulkan Device Capabilities ===\n\n")
       if (!ggmlR::ggml_vulkan_available()) {
         cat("Vulkan: NOT COMPILED\n")
