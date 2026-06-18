@@ -37,6 +37,33 @@
 #include "tensor_ggml.hpp"
 #include "util.h"
 
+// --- TEMP diagnostic: crash-survivable file logger (mirror of ggmlR's
+// r_dbg_filelog.h, which is not reachable from sd2R). Writes one line per call
+// via fopen("a")/fwrite/fclose so it survives an abort and lands in the SAME
+// file as ggmlR's vk_set_tensor / vk_graph_compute markers. Enabled by the
+// GGMLR_DBG_LOG env var; cheap no-op when unset. Remove once the FLUX
+// pre-compute stall is localized. ----------------------------------------
+#include <cstdio>
+#include <cstdarg>
+static inline void sd2r_dbg_logf(const char* fmt, ...) {
+    const char* path = std::getenv("GGMLR_DBG_LOG");
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+    FILE* f = std::fopen(path, "a");
+    if (f == nullptr) {
+        return;
+    }
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    std::fwrite(buf, 1, std::strlen(buf), f);
+    std::fwrite("\n", 1, 1, f);
+    std::fclose(f);
+}
+
 #define EPS 1e-05f
 
 #ifndef __STATIC_INLINE__
@@ -1715,6 +1742,13 @@ protected:
     size_t max_graph_vram_bytes = 0;
     bool stream_layers_enabled  = false;
 
+    // Industrial telemetry: how much weight data this runner has streamed to the
+    // runtime backend (params_backend != runtime_backend regime). Lets a single
+    // log line expose the cost that was previously only visible as a flood of
+    // low-level vk_set_tensor calls.
+    uint64_t offload_copy_count = 0;
+    uint64_t offload_copy_bytes = 0;
+
     sd::layer_registry::LayerRegistry layer_registry_;
 
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
@@ -2146,6 +2180,8 @@ protected:
 
         while (t != nullptr && offload_t != nullptr) {
             ggml_backend_tensor_copy(t, offload_t);
+            offload_copy_count++;
+            offload_copy_bytes += ggml_nbytes(t);
             std::swap(t->buffer, offload_t->buffer);
             std::swap(t->data, offload_t->data);
             std::swap(t->extra, offload_t->extra);
@@ -2234,6 +2270,8 @@ protected:
             ggml_tensor* offload_tensor = pair.second;
 
             ggml_backend_tensor_copy(tensor, offload_tensor);
+            offload_copy_count++;
+            offload_copy_bytes += ggml_nbytes(tensor);
             std::swap(tensor->buffer, offload_tensor->buffer);
             std::swap(tensor->data, offload_tensor->data);
             std::swap(tensor->extra, offload_tensor->extra);
@@ -2613,7 +2651,6 @@ protected:
         int64_t t_execute_begin              = ggml_time_ms();
         const bool use_partial_param_offload = !runtime_param_tensors.empty();
         int64_t t_offload_begin              = ggml_time_ms();
-        LOG_INFO("SD2R_DBG compute(%s): BEFORE offload params (nodes=%d)", get_desc().c_str(), ggml_graph_n_nodes(gf));
         if (use_partial_param_offload) {
             if (!offload_partial_params(runtime_param_tensors)) {
                 LOG_ERROR("%s offload partial params to runtime backend failed", get_desc().c_str());
@@ -2626,7 +2663,6 @@ protected:
             }
         }
         int64_t t_offload_end = ggml_time_ms();
-        LOG_INFO("SD2R_DBG compute(%s): AFTER offload, BEFORE alloc_compute_buffer", get_desc().c_str());
 
         int64_t t_alloc_begin = ggml_time_ms();
         if (!alloc_compute_buffer(gf)) {
@@ -2636,7 +2672,6 @@ protected:
             }
             return std::nullopt;
         }
-        LOG_INFO("SD2R_DBG compute(%s): AFTER alloc_compute_buffer, BEFORE gallocr_alloc_graph", get_desc().c_str());
 
         if (!ggml_gallocr_alloc_graph(compute_allocr, gf)) {
             LOG_ERROR("%s alloc compute graph failed", get_desc().c_str());
@@ -2648,7 +2683,6 @@ protected:
             return std::nullopt;
         }
         int64_t t_alloc_end = ggml_time_ms();
-        LOG_INFO("SD2R_DBG compute(%s): buffers allocated, copying input to backend", get_desc().c_str());
 
         int64_t t_copy_begin = ggml_time_ms();
         copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
@@ -2657,11 +2691,9 @@ protected:
             sd_backend_cpu_set_n_threads(runtime_backend, n_threads);
         }
 
-        LOG_INFO("SD2R_DBG compute(%s): calling ggml_backend_graph_compute", get_desc().c_str());
         int64_t t_compute_begin = ggml_time_ms();
         ggml_status status      = ggml_backend_graph_compute(runtime_backend, gf);
         int64_t t_compute_end   = ggml_time_ms();
-        LOG_INFO("SD2R_DBG compute(%s): ggml_backend_graph_compute returned status=%d", get_desc().c_str(), (int)status);
         if (status != GGML_STATUS_SUCCESS) {
             LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
             if (free_compute_buffer_immediately) {
@@ -2749,6 +2781,16 @@ protected:
                       t_compute_end - t_compute_begin,
                       t_cache_end - t_cache_begin,
                       ggml_time_ms() - t_execute_begin);
+        }
+        // Industrial telemetry: surface cumulative weight streaming for this
+        // runner. When params are not resident on the runtime backend this grows
+        // by ~the encoder weight size on every pass — the cost that masqueraded
+        // as a "hang". A zero counter means weights are resident (the fast path).
+        if (offload_copy_bytes > 0) {
+            LOG_INFO("%s weight streaming so far: %llu copies, %.2f MB total (params_backend != runtime_backend -> uploaded on every pass)",
+                     get_desc().c_str(),
+                     (unsigned long long)offload_copy_count,
+                     offload_copy_bytes / (1024.0 * 1024.0));
         }
         return output;
     }
@@ -3147,10 +3189,47 @@ public:
                                          bool free_compute_buffer_immediately,
                                          bool no_return = false) {
         ggml_cgraph* gf = nullptr;
+        sd2r_dbg_logf("compute[%s]: BEFORE build_graph", get_desc().c_str());
         if (!prepare_compute_graph(get_graph, &gf)) {
             return std::nullopt;
         }
         GGML_ASSERT(gf != nullptr);
+        sd2r_dbg_logf("compute[%s]: AFTER build_graph n_nodes=%d n_leafs=%d graph_capacity=%d graph_overhead=%.2f MB",
+                      get_desc().c_str(),
+                      ggml_graph_n_nodes(gf),
+                      sd::ggml_graph_cut::leaf_count(gf),
+                      ggml_graph_size(gf),
+                      ggml_graph_overhead_custom((size_t)ggml_graph_size(gf), false) / (1024.0 * 1024.0));
+
+        // TEMP: per-node dump. Heavy (thousands of lines), so gated by its own
+        // env var AND emitted only once per process to avoid repeating the full
+        // graph on every Euler step. Set GGMLR_DBG_NODES=1 to enable.
+        {
+            static bool s_nodes_dumped = false;
+            if (!s_nodes_dumped) {
+                const char* want = std::getenv("GGMLR_DBG_NODES");
+                if (want != nullptr && want[0] != '\0' && want[0] != '0') {
+                    s_nodes_dumped = true;
+                    const int n = ggml_graph_n_nodes(gf);
+                    sd2r_dbg_logf("compute[%s]: NODE DUMP begin (%d nodes)", get_desc().c_str(), n);
+                    for (int i = 0; i < n; ++i) {
+                        ggml_tensor* node = ggml_graph_node(gf, i);
+                        const char* nm    = ggml_get_name(node);
+                        const char* s0    = (node->src[0] != nullptr) ? ggml_op_name(node->src[0]->op) : "-";
+                        const char* s1    = (node->src[1] != nullptr) ? ggml_op_name(node->src[1]->op) : "-";
+                        sd2r_dbg_logf("node[%d] op=%s name='%s' type=%s ne=[%lld,%lld,%lld,%lld] src0_op=%s src1_op=%s",
+                                      i,
+                                      ggml_op_name(node->op),
+                                      (nm != nullptr && nm[0] != '\0') ? nm : "<unnamed>",
+                                      ggml_type_name(node->type),
+                                      (long long)node->ne[0], (long long)node->ne[1],
+                                      (long long)node->ne[2], (long long)node->ne[3],
+                                      s0, s1);
+                    }
+                    sd2r_dbg_logf("compute[%s]: NODE DUMP end", get_desc().c_str());
+                }
+            }
+        }
 
         if (can_attempt_graph_cut_segmented_compute()) {
             GraphCutPlan plan;
@@ -3175,10 +3254,14 @@ public:
                                                   no_return);
             }
         }
+        sd2r_dbg_logf("compute[%s]: BEFORE gallocr_reserve", get_desc().c_str());
         if (!alloc_compute_buffer(gf)) {
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;
         }
+        sd2r_dbg_logf("compute[%s]: AFTER gallocr_reserve -> execute_graph (compute_buffer=%.2f MB)",
+                      get_desc().c_str(),
+                      (compute_allocr != nullptr ? ggml_gallocr_get_buffer_size(compute_allocr, 0) : 0) / (1024.0 * 1024.0));
         return execute_graph<T>(gf,
                                 n_threads,
                                 free_compute_buffer_immediately,

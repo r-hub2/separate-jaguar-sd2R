@@ -1250,7 +1250,9 @@ struct FluxCLIPEmbedder : public Conditioner {
     std::vector<std::pair<std::vector<int>, std::vector<float>>> tokenize(std::string text,
                                                                           size_t min_length = 0,
                                                                           size_t max_length = 0) {
+        sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: BEFORE parse_prompt_attention");
         auto parsed_attention = parse_prompt_attention(text);
+        sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: AFTER parse_prompt_attention n_segments=%zu", parsed_attention.size());
 
         {
             std::stringstream ss;
@@ -1270,27 +1272,35 @@ struct FluxCLIPEmbedder : public Conditioner {
         std::vector<float> clip_l_weights;
         std::vector<int> t5_tokens;
         std::vector<float> t5_weights;
+        int seg = 0;
         for (const auto& item : parsed_attention) {
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
             if (clip_l) {
+                sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: seg=%d BEFORE clip_l.encode len=%zu", seg, curr_text.size());
                 std::vector<int> curr_tokens = clip_l_tokenizer.encode(curr_text, on_new_token_cb);
+                sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: seg=%d AFTER clip_l.encode n=%zu", seg, curr_tokens.size());
                 clip_l_tokens.insert(clip_l_tokens.end(), curr_tokens.begin(), curr_tokens.end());
                 clip_l_weights.insert(clip_l_weights.end(), curr_tokens.size(), curr_weight);
             }
             if (t5) {
+                sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: seg=%d BEFORE t5.encode len=%zu", seg, curr_text.size());
                 std::vector<int> curr_tokens = t5_tokenizer.encode(curr_text);
+                sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: seg=%d AFTER t5.encode n=%zu", seg, curr_tokens.size());
                 t5_tokens.insert(t5_tokens.end(), curr_tokens.begin(), curr_tokens.end());
                 t5_weights.insert(t5_weights.end(), curr_tokens.size(), curr_weight);
             }
+            seg++;
         }
 
+        sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: BEFORE pad_tokens");
         if (clip_l) {
             clip_l_tokenizer.pad_tokens(clip_l_tokens, &clip_l_weights, nullptr, 77, 77, true);
         }
         if (t5) {
             t5_tokenizer.pad_tokens(t5_tokens, &t5_weights, nullptr, min_length, max_length, true);
         }
+        sd2r_dbg_logf("FluxCLIPEmbedder::tokenize: AFTER pad_tokens clip_l=%zu t5=%zu", clip_l_tokens.size(), t5_tokens.size());
 
         // for (int i = 0; i < clip_l_tokens.size(); i++) {
         //     std::cout << clip_l_tokens[i] << ":" << clip_l_weights[i] << ", ";
@@ -1323,6 +1333,8 @@ struct FluxCLIPEmbedder : public Conditioner {
         sd::Tensor<float> pooled;         // [768,]
 
         size_t chunk_count = std::max(clip_l_tokens.size() > 0 ? chunk_len : 0, t5_tokens.size()) / chunk_len;
+        sd2r_dbg_logf("FluxCLIPEmbedder: ENTER common chunk_count=%zu clip_l_tokens=%zu t5_tokens=%zu clip_l=%p t5=%p",
+                      chunk_count, clip_l_tokens.size(), t5_tokens.size(), (void*)clip_l.get(), (void*)t5.get());
         for (int chunk_idx = 0; chunk_idx < chunk_count; chunk_idx++) {
             // clip_l
             if (chunk_idx == 0) {
@@ -1339,6 +1351,7 @@ struct FluxCLIPEmbedder : public Conditioner {
                     auto it       = std::find(chunk_tokens.begin(), chunk_tokens.end(), clip_l_tokenizer.EOS_TOKEN_ID);
                     max_token_idx = std::min<size_t>(std::distance(chunk_tokens.begin(), it), chunk_tokens.size() - 1);
 
+                    sd2r_dbg_logf("FluxCLIPEmbedder: BEFORE clip_l->compute max_token_idx=%zu", max_token_idx);
                     pooled = clip_l->compute(n_threads,
                                              input_ids,
                                              0,
@@ -1346,6 +1359,7 @@ struct FluxCLIPEmbedder : public Conditioner {
                                              max_token_idx,
                                              true,
                                              clip_skip);
+                    sd2r_dbg_logf("FluxCLIPEmbedder: AFTER clip_l->compute pooled_empty=%d", (int)pooled.empty());
                     GGML_ASSERT(!pooled.empty());
                 } else {
                     pooled = sd::Tensor<float>::zeros({768});
@@ -1361,9 +1375,11 @@ struct FluxCLIPEmbedder : public Conditioner {
                                                  t5_weights.begin() + (chunk_idx + 1) * chunk_len);
 
                 sd::Tensor<int32_t> input_ids({static_cast<int64_t>(chunk_tokens.size())}, chunk_tokens);
+                sd2r_dbg_logf("FluxCLIPEmbedder: BEFORE t5->compute chunk_idx=%d n_tokens=%zu", chunk_idx, chunk_tokens.size());
                 chunk_hidden_states = t5->compute(n_threads,
                                                   input_ids,
                                                   sd::Tensor<float>());
+                sd2r_dbg_logf("FluxCLIPEmbedder: AFTER t5->compute chunk_idx=%d empty=%d", chunk_idx, (int)chunk_hidden_states.empty());
                 GGML_ASSERT(!chunk_hidden_states.empty());
                 chunk_hidden_states = ::apply_token_weights(std::move(chunk_hidden_states), chunk_weights);
                 if (zero_out_masked) {
@@ -1390,11 +1406,15 @@ struct FluxCLIPEmbedder : public Conditioner {
 
     SDCondition get_learned_condition(int n_threads,
                                       const ConditionerParams& conditioner_params) override {
+        sd2r_dbg_logf("FluxCLIPEmbedder: ENTER get_learned_condition text_len=%zu", conditioner_params.text.size());
         auto tokens_and_weights = tokenize(conditioner_params.text, chunk_len, chunk_len);
-        return get_learned_condition_common(n_threads,
-                                            tokens_and_weights,
-                                            conditioner_params.clip_skip,
-                                            conditioner_params.zero_out_masked);
+        sd2r_dbg_logf("FluxCLIPEmbedder: AFTER tokenize");
+        auto result = get_learned_condition_common(n_threads,
+                                                   tokens_and_weights,
+                                                   conditioner_params.clip_skip,
+                                                   conditioner_params.zero_out_masked);
+        sd2r_dbg_logf("FluxCLIPEmbedder: AFTER get_learned_condition (returning)");
+        return result;
     }
 };
 
@@ -1829,12 +1849,10 @@ struct LLMEmbedder : public Conditioner {
                 parsed_attention.emplace_back(text.substr(0, attn_range.first), 1.f);
             }
             if (attn_range.second - attn_range.first > 0) {
-                LOG_INFO("SD2R_DBG tokenize: BEFORE parse_prompt_attention");
                 auto new_parsed_attention = parse_prompt_attention(text.substr(attn_range.first, attn_range.second - attn_range.first));
                 if (spell_quotes) {
                     new_parsed_attention = split_quotation_attention(new_parsed_attention);
                 }
-                LOG_INFO("SD2R_DBG tokenize: AFTER parse_prompt_attention (%zu chunks)", new_parsed_attention.size());
                 parsed_attention.insert(parsed_attention.end(),
                                         new_parsed_attention.begin(),
                                         new_parsed_attention.end());
@@ -1858,21 +1876,16 @@ struct LLMEmbedder : public Conditioner {
 
         std::vector<int> tokens;
         std::vector<float> weights;
-        LOG_INFO("SD2R_DBG tokenize: %zu attention chunk(s), BEFORE encode loop", parsed_attention.size());
         for (const auto& item : parsed_attention) {
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
-            LOG_INFO("SD2R_DBG tokenize: BEFORE encode chunk len=%zu", curr_text.size());
             std::vector<int> curr_tokens = tokenizer->encode(curr_text, nullptr);
-            LOG_INFO("SD2R_DBG tokenize: AFTER encode chunk -> %zu tokens", curr_tokens.size());
             tokens.insert(tokens.end(), curr_tokens.begin(), curr_tokens.end());
             weights.insert(weights.end(), curr_tokens.size(), curr_weight);
         }
 
         std::vector<float> mask;
-        LOG_INFO("SD2R_DBG tokenize: BEFORE pad_tokens (%zu tokens)", tokens.size());
         tokenizer->pad_tokens(tokens, &weights, &mask, min_length, max_length);
-        LOG_INFO("SD2R_DBG tokenize: AFTER pad_tokens (%zu tokens)", tokens.size());
 
         // for (int i = 0; i < tokens.size(); i++) {
         //     std::cout << tokens[i] << ":" << weights[i] << ", " << i << std::endl;
@@ -1892,9 +1905,7 @@ struct LLMEmbedder : public Conditioner {
                                     int prompt_template_encode_start_idx,
                                     bool spell_quotes = false,
                                     int max_length    = 100000000) {
-        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: BEFORE tokenize");
         auto tokens_weights_mask = tokenize(prompt, prompt_attn_range, min_length, max_length, spell_quotes);
-        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: AFTER tokenize (%zu tokens)", std::get<0>(tokens_weights_mask).size());
         auto& tokens             = std::get<0>(tokens_weights_mask);
         auto& weights            = std::get<1>(tokens_weights_mask);
         auto& mask               = std::get<2>(tokens_weights_mask);
@@ -1918,13 +1929,11 @@ struct LLMEmbedder : public Conditioner {
             }
         }
 
-        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: BEFORE llm->compute (out_layers=%zu)", out_layers.size());
         auto hidden_states = llm->compute(n_threads,
                                           input_ids,
                                           attention_mask,
                                           image_embeds,
                                           out_layers);
-        LOG_INFO("SD2R_DBG LLMEmbedder::encode_prompt: AFTER llm->compute");
         GGML_ASSERT(!hidden_states.empty());
         hidden_states = apply_token_weights(std::move(hidden_states), weights);
         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
